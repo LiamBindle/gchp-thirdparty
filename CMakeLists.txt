@@ -3,10 +3,16 @@ project(GCHP_ThirdParty VERSION 12.2.0 LANGUAGES Fortran C CXX)
 
 include(ExternalProject)
 
+if(EXISTS ${GC_BUILD_INIT_DIR})
+    message(STATUS "Loading GEOS-Chem build configuration from ${GC_BUILD_INIT_DIR}")
+    load_cache(${GC_BUILD_INIT_DIR})
+    unset(GC_BUILD_INIT_DIR CACHE)
+endif()
+
 #[[ ESMF ]]
 find_package(MPI REQUIRED C CXX Fortran)
 
-set(ESMF_INSTALL_PREFIX ${CMAKE_INSTALL_PREFIX}/ESMF/${CMAKE_Fortran_COMPILER_ID}/${CMAKE_Fortran_COMPILER_VERSION})
+set(ESMF_INSTALL_PREFIX ${GCHP_THIRD_PARTY_INSTALL}/ESMF/${CMAKE_Fortran_COMPILER_ID}/${CMAKE_Fortran_COMPILER_VERSION})
 message(STATUS "ESMF install prefix: ${ESMF_INSTALL_PREFIX}")
 set(ESMF_MAKE_ARGS
     CC=${MPI_C_COMPILER} CXX=${MPI_CXX_COMPILER} FC=${MPI_Fortran_COMPILER} 
@@ -34,7 +40,7 @@ target_link_libraries(ESMF INTERFACE ${ESMF_INSTALL_PREFIX}/lib/libesmf.a)
 target_include_directories(ESMF INTERFACE ${ESMF_INSTALL_PREFIX}/mod ${ESMF_INSTALL_PREFIX}/include)
 
 #[[ gFTL ]]
-set(gFTL_INSTALL_PREFIX ${CMAKE_INSTALL_PREFIX}/gFTL/${CMAKE_Fortran_COMPILER_ID}/${CMAKE_Fortran_COMPILER_VERSION})
+set(gFTL_INSTALL_PREFIX ${GCHP_THIRD_PARTY_INSTALL}/gFTL/${CMAKE_Fortran_COMPILER_ID}/${CMAKE_Fortran_COMPILER_VERSION})
 message(STATUS "gFTL install prefix: ${gFTL_INSTALL_PREFIX}")
 ExternalProject_Add(gFTL_build
     SOURCE_DIR ${CMAKE_SOURCE_DIR}/gFTL
@@ -46,7 +52,7 @@ add_library(gFTL INTERFACE)
 target_include_directories(gFTL INTERFACE ${gFTL_INSTALL_PREFIX}/include)
 
 #[[ Export targets ]]
-set(GCHPThirdParty_INSTALL_PREFIX ${CMAKE_INSTALL_PREFIX}/cmake/GCHP-thirdparty/${CMAKE_Fortran_COMPILER_ID}/${CMAKE_Fortran_COMPILER_VERSION})
+set(GCHPThirdParty_INSTALL_PREFIX ${GCHP_THIRD_PARTY_INSTALL}/cmake/GCHP-thirdparty/${CMAKE_Fortran_COMPILER_ID}/${CMAKE_Fortran_COMPILER_VERSION})
 message(STATUS "GCHP third-party exported targets install prefix: ${GCHPThirdParty_INSTALL_PREFIX}")
 install(TARGETS gFTL ESMF 
     EXPORT GCHPThirdPartyTargets
