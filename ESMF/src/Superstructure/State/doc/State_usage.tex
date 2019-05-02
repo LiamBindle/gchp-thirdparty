@@ -1,0 +1,97 @@
+% $Id$
+%
+% Earth System Modeling Framework
+% Copyright 2002-2019, University Corporation for Atmospheric Research, 
+% Massachusetts Institute of Technology, Geophysical Fluid Dynamics 
+% Laboratory, University of Michigan, National Centers for Environmental 
+% Prediction, Los Alamos National Laboratory, Argonne National Laboratory, 
+% NASA Goddard Space Flight Center.
+% Licensed under the University of Illinois-NCSA License.
+
+%\subsection{Use and Examples}
+
+A Gridded Component generally has one associated import 
+State and one export State.  Generally the States 
+associated with a Gridded Component will be created by 
+the Gridded Component's parent component.
+In many cases, the States will be created containing 
+no data.  Both the empty States and the
+newly created Gridded Component are passed
+by the parent component into the Gridded Component's initialize 
+method.  This is where the States get prepared for use 
+and the import State is first filled with data.
+
+States can be filled with data items that do not yet 
+have data allocated.  Fields, FieldBundles, Arrays, and ArrayBundles each have 
+methods that support their creation without actual data 
+allocation - the Grid and Attributes are set up but no
+Fortran array of data values is allocated.  In this approach, 
+when a State is passed into its associated Gridded Component's 
+initialize method, the incomplete Arrays, Fields, FieldBundles,
+and ArrayBundles within the State can allocate or reference data 
+inside the initialize method.
+
+States are passed through the interfaces of the Gridded 
+and Coupler Components' run methods in order to carry data 
+between the components.  While we expect
+a Gridded Component's import State to be filled with data 
+during initialization, its export State will typically be
+filled over the course of its run method.  At the end of
+a Gridded Component's run method, the filled export State 
+is passed out through the argument list into a Coupler 
+Component's run method.  We recommend the convention that 
+it enters the Coupler Component as the Coupler Component's
+import State.  Here is it transformed into a form
+that another Gridded Component requires, and passed out
+of the Coupler Component as its export State.  It can then
+be passed into the run method of a recipient Gridded Component
+as that component's import State.
+
+While the above sounds complicated, the rule is simple:
+a State going into a component is an import State, and a 
+State leaving a component is an export State.
+
+Objects inside States are normally created in {\it unison} where
+each PET executing a component makes the same object create call.
+If the object contains data, like a Field, each PET may have a
+different local chunk of the entire dataset but each Field has
+the same name and is logically one part of a single distributed 
+object.   As States are passed between components, if any object
+in a State was not created in unison on all the current PETs 
+then some PETs have no object to pass into a
+communication method (e.g. regrid or data redistribution).
+The {\tt ESMF\_StateReconcile()} method must be called to broadcast 
+information about these objects to all PETs in a component;
+after which all PETs have a single uniform view of all objects and metadata.  
+
+If components are running in sequential mode on all available PETs
+and States are being passed between them there is no need to call 
+{\tt ESMF\_StateReconcile} since all PETs have a uniform view of the objects.
+However, if components are running on a subset of the PETs, as is
+usually the case when running in concurrent mode, then when States
+are passed into components which contain a superset of those PETs,
+for example, a Coupler Component, all PETs must call {\tt ESMF\_StateReconcile}
+on the States before using them in any ESMF communication methods.
+The reconciliation process broadcasts information about objects
+which exist only on a subset of the PETs.  On PETs missing those
+objects it creates a {\it proxy} object which contains any
+qualities of the original object plus enough information for it
+to be a data source or destination for a regrid or data redistribution
+operation.  There is an option to turn off metadata reconciliation in the 
+{\tt ESMF\_StateReconcile} call.
+
+\subsubsection{State create and destroy}
+
+States can be created and destroyed at any time during
+application execution.  The {\tt ESMF\_StateCreate()} routine
+can take many different combinations of optional arguments.  Refer
+to the API description for all possible methods of creating a State.
+An empty State can be created by providing only a name and type for
+the intended State:
+
+{\tt state = ESMF\_StateCreate(name, stateintent=ESMF\_STATEINTENT\_IMPORT, rc=rc)}
+
+When finished with an {\tt ESMF\_State}, the {\tt ESMF\_StateDestroy} method
+removes it.  However, the objects inside the {\tt ESMF\_State}
+created externally should be destroyed separately,
+since objects can be added to more than one {\tt ESMF\_State}.

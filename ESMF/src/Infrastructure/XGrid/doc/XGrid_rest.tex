@@ -1,0 +1,17 @@
+% $Id$
+
+\subsubsection{Restrictions and Future Work}
+
+\begin{enumerate}
+\label{XGrid:rest}
+
+\item {\bf CAUTION:} Any Grid or Mesh pair picked from the A side and B side of the XGrid 
+cannot point to the same Grid or Mesh in memory on a local PET. This prevents Regrid from
+selecting the right source and destination grid automatically to calculate the regridding routehandle.
+It's okay for the Grid and Mesh to have identical topological and geographical properties as long
+as they are stored in different memory.
+
+\end{enumerate}
+
+
+

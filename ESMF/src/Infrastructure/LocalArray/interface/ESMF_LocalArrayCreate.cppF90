@@ -1,0 +1,3298 @@
+! $Id$
+!
+! Earth System Modeling Framework
+! Copyright 2002-2019, University Corporation for Atmospheric Research,
+! Massachusetts Institute of Technology, Geophysical Fluid Dynamics
+! Laboratory, University of Michigan, National Centers for Environmental
+! Prediction, Los Alamos National Laboratory, Argonne National Laboratory,
+! NASA Goddard Space Flight Center.
+! Licensed under the University of Illinois-NCSA License.
+!
+!==============================================================================
+^define ESMF_FILENAME "ESMF_LocalArrayCreate.F90"
+!==============================================================================
+!
+! ESMF LocalArrayCreate module
+module ESMF_LocalArrayCreateMod
+!
+!==============================================================================
+!
+! This file contains the LocalArray class definition and all LocalArray
+! class methods.
+!
+!------------------------------------------------------------------------------
+! INCLUDES
+! < ignore blank lines below.  they are created by the files which
+!   define various macros. >
+^include "ESMF.h"
+#include "ESMF_TypeKindRankMacros.hcppF90"
+
+!------------------------------------------------------------------------------
+!BOPI
+! !MODULE: ESMF_LocalArrayCreateMod - Manage data uniformly between Fortran and C++
+!
+! !DESCRIPTION:
+!
+! The code in this file implements the {\tt ESMF\_LocalArray} class and
+!  associated functions and subroutines.
+!
+! C and C++ arrays are simple pointers to memory.
+! Fortran arrays contain shape and stride definitions and are strongly
+! typed.  To enable interoperability between the languages the C++ code
+! must be able to obtain this information from the Fortran description
+! (which is called the "dope vector" in Fortran), either through a priori
+! knowledge or through query.
+!EOPI
+!------------------------------------------------------------------------------
+! !USES:
+  use ESMF_UtilTypesMod     ! ESMF utility types
+  use ESMF_InitMacrosMod    ! ESMF initializer macros
+  use ESMF_BaseMod          ! ESMF base class
+  use ESMF_LogErrMod        ! ESMF error handling
+  use ESMF_IOUtilMod
+
+  use ESMF_ArraySpecMod
+  use ESMF_LocalArrayWrapperTypeMod ! contains the LAWrapper derived type
+
+  use ISO_C_BINDING
+
+  implicit none
+
+!------------------------------------------------------------------------------
+! !PRIVATE TYPES:
+  private
+!------------------------------------------------------------------------------
+  ! ESMF_DataCopy_Flag
+
+  ! Indicates whether a data array should be copied or referenced.
+  !  This matches an enum on the C++ side and the values must match.
+  !  Update ../include/ESMCI_LocalArray.h if you change these values.
+
+  type ESMF_DataCopy_Flag
+^ifndef ESMF_NO_SEQUENCE
+  sequence
+^endif
+  private
+    integer :: datacopyflag
+  end type
+
+  type(ESMF_DataCopy_Flag), parameter :: &
+    ESMF_DATACOPY_VALUE  = ESMF_DataCopy_Flag(1), &
+    ESMF_DATACOPY_REFERENCE   = ESMF_DataCopy_Flag(2), &
+    ESMF_DATA_DEFER = ESMF_DataCopy_Flag(3), &
+    ESMF_DATA_SPACE = ESMF_DataCopy_Flag(4)
+
+!------------------------------------------------------------------------------
+  ! ESMF_LocalArrayOrigin
+
+  ! Private flag which indicates the create was initiated on the Fortran side.
+  !  This matches an enum on the C++ side and the values must match.
+  !  Update ../include/ESMCI_LocalArray.h if you change these values.
+
+  type, public :: ESMF_LocalArrayOrigin
+^ifndef ESMF_NO_SEQUENCE
+  sequence
+^endif
+  private
+    integer :: origin
+  end type
+
+  type(ESMF_LocalArrayOrigin), parameter :: &
+    ESMF_FROM_FORTRAN   = ESMF_LocalArrayOrigin(1), &
+    ESMF_FROM_CPLUSPLUS = ESMF_LocalArrayOrigin(2)
+
+!------------------------------------------------------------------------------
+  ! ESMF_LocalArray
+
+  ! LocalArray data type.  All information is kept on the C++ side inside
+  ! the class structure.
+
+  type ESMF_LocalArray
+^ifndef ESMF_NO_SEQUENCE
+  sequence
+^endif
+  !private
+    type(ESMF_Pointer) :: this
+    ESMF_INIT_DECLARE
+  end type
+
+!------------------------------------------------------------------------------
+! !PUBLIC TYPES:
+  public ESMF_DataCopy_Flag, ESMF_DATACOPY_VALUE, ESMF_DATACOPY_REFERENCE, ESMF_DATA_SPACE
+  public ESMF_LocalArray
+!------------------------------------------------------------------------------
+
+! !PUBLIC MEMBER FUNCTIONS:
+
+  public operator(==)
+  public operator(/=)
+
+  public ESMF_LocalArrayCreate
+  public ESMF_LocalArrayDestroy
+
+  public ESMF_LocalArrConstrF90Ptr
+  public ESMF_LocalArrayF90Deallocate
+
+  public ESMF_LocalArrCToF90Ptr
+
+  public ESMF_LocalArrayCopyF90Ptr
+  public ESMF_LocalArrayAdjust
+
+  public ESMF_LocalArrayValidate
+  public ESMF_LocalArrayPrint
+
+  public ESMF_LocalArrayGetInit
+  public ESMF_LocalArraySetInitCreated
+  public ESMF_LocalArrayGetThis
+  public ESMF_LocalArraySetThis
+
+!------------------------------------------------------------------------------
+! The following line turns the CVS identifier string into a printable variable.
+  character(*), parameter, private :: version = &
+    '$Id$'
+
+!==============================================================================
+!
+! INTERFACE BLOCKS
+!
+!==============================================================================
+
+!BOPI
+! !IROUTINE: ESMF_LocalArrayCreate -- Generic interface to create an LocalArray
+
+! !INTERFACE:
+  interface ESMF_LocalArrayCreate
+
+! !PRIVATE MEMBER FUNCTIONS:
+!
+    module procedure ESMF_LocalArrayCreateByTKR   ! specify explicit TKR
+    module procedure ESMF_LocalArrayCreateBySpec  ! specify ArraySpec
+    module procedure ESMF_LocalArrayCreateCopy    ! create a copy
+    ! Plus interfaces for each T/K/R expanded by macro.
+!EOPI
+
+    ! < interfaces for each T/K/R >
+    TypeKindRankInterfaceMacro(LocalArrCreateByPtr)
+
+!BOPI
+! !DESCRIPTION:
+! This interface provides a single (heavily overloaded) entry point for
+!  the various types of {\tt ESMF\_LocalArrayCreate} functions.
+!
+!  There are 3 options for setting the contents of the {\tt ESMF\_LocalArray}
+!  at creation time:
+!  \begin{description}
+!  \item[Allocate Space Only]
+!    Data space is allocated but not initialized.  The caller can query
+!    for a pointer to the start of the space to address it directly.
+!    The caller must not deallocate the space; the
+!    {\tt ESMF\_LocalArray} will release the space when it is destroyed.
+!  \item[Data Copy]
+!    An existing Fortran array is specified and the data contents are copied
+!    into new space allocated by the {\tt ESMF\_LocalArray}.
+!    The caller must not deallocate the space; the
+!    {\tt ESMF\_LocalArray} will release the space when it is destroyed.
+!  \item[Data Reference]
+!    An existing Fortran array is specified and the data contents reference
+!    it directly.  The caller is responsible for deallocating the space;
+!    when the {\tt ESMF\_LocalArray} is destroyed it will not release the space.
+!  \end{description}
+!
+!  There are 3 options for
+!  specifying the type/kind/rank of the {\tt ESMF\_LocalArray} data:
+!  \begin{description}
+!  \item[List]
+!    The characteristics of the {\tt ESMF\_LocalArray} are given explicitly
+!    by individual arguments to the create function.
+!  \item[ArraySpec]
+!    A previously created {\tt ESMF\_ArraySpec} object is given which
+!    describes the characteristics.
+!  \item[Fortran 90 Pointer]
+!    An associated or unassociated Fortran 90 array pointer is used to
+!    describe the array.
+!    (Only available from the Fortran interface.)
+!  \end{description}
+!
+!  The concept of an {\itshape empty} {\tt ESMF\_LocalArray} does not exist.  To make an
+!  ESMF object which stores the Type/Kind/Rank information create an
+!  {\tt ESMF\_ArraySpec} object which can then be used repeatedly in
+!  subsequent {\tt ESMF\_LocalArray} Create calls.
+!
+!EOPI
+end interface
+!------------------------------------------------------------------------------
+
+!===============================================================================
+! LocalArrayOperator() interfaces
+!===============================================================================
+
+! -------------------------- ESMF-public method -------------------------------
+!BOP
+! !IROUTINE: ESMF_LocalArrayAssignment(=) - LocalArray assignment
+!
+! !INTERFACE:
+!   interface assignment(=)
+!   localarray1 = localarray2
+!
+! !ARGUMENTS:
+!   type(ESMF_LocalArray) :: localarray1
+!   type(ESMF_LocalArray) :: localarray2
+!
+! !STATUS:
+! \begin{itemize}
+! \item\apiStatusCompatibleVersion{5.2.0r}
+! \end{itemize}
+!
+! !DESCRIPTION:
+!   Assign localarray1 as an alias to the same ESMF LocalArray object in memory
+!   as localarray2. If localarray2 is invalid, then localarray1 will be equally invalid after
+!   the assignment.
+!
+!   The arguments are:
+!   \begin{description}
+!   \item[localarray1]
+!     The {\tt ESMF\_LocalArray} object on the left hand side of the assignment.
+!   \item[localarray2]
+!     The {\tt ESMF\_LocalArray} object on the right hand side of the assignment.
+!   \end{description}
+!
+!EOP
+!------------------------------------------------------------------------------
+
+
+! -------------------------- ESMF-public method -------------------------------
+!BOP
+! !IROUTINE: ESMF_LocalArrayOperator(==) - LocalArray equality operator
+!
+! !INTERFACE:
+  interface operator(==)
+!   if (localarray1 == localarray2) then ... endif
+!             OR
+!   result = (localarray1 == localarray2)
+! !RETURN VALUE:
+!   logical :: result
+!
+! !ARGUMENTS:
+!   type(ESMF_LocalArray), intent(in) :: localarray1
+!   type(ESMF_LocalArray), intent(in) :: localarray2
+!
+! !STATUS:
+! \begin{itemize}
+! \item\apiStatusCompatibleVersion{5.2.0r}
+! \end{itemize}
+!
+! !DESCRIPTION:
+!   Test whether localarray1 and localarray2 are valid aliases to the same ESMF
+!   LocalArray object in memory. For a more general comparison of two ESMF LocalArrays,
+!   going beyond the simple alias test, the ESMF\_LocalArrayMatch() function (not yet
+!   implemented) must be used.
+!
+!   The arguments are:
+!   \begin{description}
+!   \item[localarray1]
+!     The {\tt ESMF\_LocalArray} object on the left hand side of the equality
+!     operation.
+!   \item[localarray2]
+!     The {\tt ESMF\_LocalArray} object on the right hand side of the equality
+!     operation.
+!   \end{description}
+!
+!EOP
+    module procedure ESMF_LocalArrayEQ
+
+    module procedure ESMF_cfeq
+
+  end interface
+!------------------------------------------------------------------------------
+
+
+! -------------------------- ESMF-public method -------------------------------
+!BOP
+! !IROUTINE: ESMF_LocalArrayOperator(/=) - LocalArray not equal operator
+!
+! !INTERFACE:
+  interface operator(/=)
+!   if (localarray1 /= localarray2) then ... endif
+!             OR
+!   result = (localarray1 /= localarray2)
+! !RETURN VALUE:
+!   logical :: result
+!
+! !ARGUMENTS:
+!   type(ESMF_LocalArray), intent(in) :: localarray1
+!   type(ESMF_LocalArray), intent(in) :: localarray2
+!
+! !STATUS:
+! \begin{itemize}
+! \item\apiStatusCompatibleVersion{5.2.0r}
+! \end{itemize}
+!
+! !DESCRIPTION:
+!   Test whether localarray1 and localarray2 are {\it not} valid aliases to the
+!   same ESMF LocalArray object in memory. For a more general comparison of two ESMF
+!   LocalArrays, going beyond the simple alias test, the ESMF\_LocalArrayMatch() function
+!   (not yet implemented) must be used.
+!
+!   The arguments are:
+!   \begin{description}
+!   \item[localarray1]
+!     The {\tt ESMF\_LocalArray} object on the left hand side of the non-equality
+!     operation.
+!   \item[localarray2]
+!     The {\tt ESMF\_LocalArray} object on the right hand side of the non-equality
+!     operation.
+!   \end{description}
+!
+!EOP
+    module procedure ESMF_LocalArrayNE
+
+    module procedure ESMF_cfne
+
+  end interface
+!------------------------------------------------------------------------------
+
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+contains
+
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+
+!-------------------------------------------------------------------------------
+^undef  ESMF_METHOD
+^define ESMF_METHOD "ESMF_LocalArrayEQ()"
+!BOPI
+! !IROUTINE:  ESMF_LocalArrayEQ - Compare two LocalArrays for equality
+!
+! !INTERFACE:
+  function ESMF_LocalArrayEQ(localarray1, localarray2)
+!
+! !RETURN VALUE:
+    logical :: ESMF_LocalArrayEQ
+
+! !ARGUMENTS:
+    type(ESMF_LocalArray), intent(in) :: localarray1
+    type(ESMF_LocalArray), intent(in) :: localarray2
+
+! !DESCRIPTION:
+!   Test if both {\tt localarray1} and {\tt localarray2} alias the same ESMF LocalArray
+!   object.
+!
+!EOPI
+!-------------------------------------------------------------------------------
+
+    ESMF_INIT_TYPE lainit1, lainit2
+    integer :: localrc1, localrc2
+    logical :: lval1, lval2
+
+    ! Use the following logic, rather than "ESMF-INIT-CHECK-DEEP", to gain
+    ! init checks on both args, and in the case where both are uninitialized,
+    ! to distinguish equality based on uninitialized type (uncreated,
+    ! deleted).
+
+    ! TODO: Consider moving this logic to C++: use Base class? status?
+    !       Or replicate logic for C interface also.
+
+    ! check inputs
+    lainit1 = ESMF_LocalArrayGetInit(localarray1)
+    lainit2 = ESMF_LocalArrayGetInit(localarray2)
+
+    ! TODO: this line must remain split in two for SunOS f90 8.3 127000-03
+    if (lainit1 .eq. ESMF_INIT_CREATED .and. &
+      lainit2 .eq. ESMF_INIT_CREATED) then
+      ESMF_LocalArrayEQ = localarray1%this .eq. localarray2%this
+    else
+      ESMF_LocalArrayEQ = ESMF_FALSE
+    endif
+
+  end function ESMF_LocalArrayEQ
+!-------------------------------------------------------------------------------
+
+!-------------------------------------------------------------------------------
+^undef  ESMF_METHOD
+^define ESMF_METHOD "ESMF_LocalArrayNE()"
+!BOPI
+! !IROUTINE:  ESMF_LocalArrayNE - Compare two LocalArrays for non-equality
+!
+! !INTERFACE:
+  function ESMF_LocalArrayNE(localarray1, localarray2)
+!
+! !RETURN VALUE:
+    logical :: ESMF_LocalArrayNE
+
+! !ARGUMENTS:
+    type(ESMF_LocalArray), intent(in) :: localarray1
+    type(ESMF_LocalArray), intent(in) :: localarray2
+
+! !DESCRIPTION:
+!   Test if both {\tt localarray1} and {\tt localarray2} alias the same ESMF LocalArray
+!   object.
+!
+!EOPI
+!-------------------------------------------------------------------------------
+
+    ESMF_INIT_TYPE lainit1, lainit2
+    integer :: localrc1, localrc2
+    logical :: lval1, lval2
+
+    ! Use the following logic, rather than "ESMF-INIT-CHECK-DEEP", to gain
+    ! init checks on both args, and in the case where both are uninitialized,
+    ! to distinguish equality based on uninitialized type (uncreated,
+    ! deleted).
+
+    ESMF_LocalArrayNE = .not.ESMF_LocalArrayEQ(localarray1, localarray2)
+
+  end function ESMF_LocalArrayNE
+!-------------------------------------------------------------------------------
+
+! functions to compare two ESMF_DataCopy_Flags to see if they are the same or not
+
+function ESMF_cfeq(cf1, cf2)
+ logical ESMF_cfeq
+ type(ESMF_DataCopy_Flag), intent(in) :: cf1, cf2
+
+ ESMF_cfeq = (cf1%datacopyflag .eq. cf2%datacopyflag)
+end function
+
+function ESMF_cfne(cf1, cf2)
+ logical ESMF_cfne
+ type(ESMF_DataCopy_Flag), intent(in) :: cf1, cf2
+
+ ESMF_cfne = (cf1%datacopyflag .ne. cf2%datacopyflag)
+end function
+
+
+!------------------------------------------------------------------------------
+!------------------------------------------------------------------------------
+!
+! This section includes the LocalArray Create and Destroy methods.
+!
+!------------------------------------------------------------------------------
+
+
+!------------------------------------------------------------------------------
+^undef  ESMF_METHOD
+^define ESMF_METHOD "ESMF_LocalArrayCreateByTKR"
+!BOP
+! !IROUTINE: ESMF_LocalArrayCreate -- Create a LocalArray by explicitly specifying typekind and rank arguments
+
+! !INTERFACE:
+  ! Private name; call using ESMF_LocalArrayCreate()
+  function ESMF_LocalArrayCreateByTKR(typekind, rank, keywordEnforcer, totalCount, &
+    totalLBound, totalUBound, rc)
+!
+! !RETURN VALUE:
+    type(ESMF_LocalArray) :: ESMF_LocalArrayCreateByTKR
+!
+! !ARGUMENTS:
+    type(ESMF_TypeKind_Flag), intent(in)            :: typekind
+    integer,                  intent(in)            :: rank
+    type(ESMF_KeywordEnforcer), optional:: keywordEnforcer ! must use keywords below
+    integer,                  intent(in),  optional :: totalCount(:)
+    integer,                  intent(in),  optional :: totalLBound(:)
+    integer,                  intent(in),  optional :: totalUBound(:)
+    integer,                  intent(out), optional :: rc
+!
+! !STATUS:
+! \begin{itemize}
+! \item\apiStatusCompatibleVersion{5.2.0r}
+! \end{itemize}
+!
+! !DESCRIPTION:
+!  Create a new {\tt ESMF\_LocalArray} and allocate data space, which remains
+!  uninitialized.  The return value is a new LocalArray.
+!
+!  The arguments are:
+!  \begin{description}
+!  \item[typekind]
+!    Array typekind. See section \ref{const:typekind} for valid values.
+!  \item[rank]
+!    Array rank (dimensionality, 1D, 2D, etc). Maximum allowed is 7D.
+!  \item[{[totalCount]}]
+!    The number of items in each dimension of the array. This is a 1D
+!    integer array the same length as the rank. The {\tt count} argument may
+!    be omitted if both {\tt totalLBound} and {\tt totalUBound} arguments are present.
+!  \item[{[totalLBound]}]
+!   An integer array of length rank, with the lower index for each dimension.
+!  \item[{[totalUBound]}]
+!   An integer array of length rank, with the upper index for each dimension.
+!   \item[{[rc]}]
+!    Return code; equals {\tt ESMF\_SUCCESS} if there are no errors.
+!   \end{description}
+!
+!EOP
+!------------------------------------------------------------------------------
+    ! Local vars
+    integer                 :: localrc          ! local return code
+    type (ESMF_LocalArray)  :: array            ! new C++ LocalArray
+    integer, dimension(ESMF_MAXDIM) :: cnts     ! local totalCount
+    integer, dimension(ESMF_MAXDIM) :: lb, ub   ! local bounds
+    integer:: i
+
+    array%this = ESMF_NULL_POINTER
+    ESMF_LocalArrayCreateByTKR = array
+
+    ! Initialize return code; assume routine not implemented
+    if (present(rc)) rc = ESMF_RC_NOT_IMPL
+    localrc = ESMF_RC_NOT_IMPL
+
+    ! Check rank argument
+    if (rank<1 .or. rank>ESMF_MAXDIM) then
+      call ESMF_LogSetError(rcToCheck=ESMF_RC_ARG_BAD, &
+        msg="Unsupported rank", &
+        ESMF_CONTEXT, rcToReturn=rc)
+      return
+    endif
+
+    ! Check that enough info from totalCount, totalLBound and totalUBound is present
+    if (.not.present(totalCount)) then
+      if (.not.present(totalLBound).or..not.present(totalUBound)) then
+        call ESMF_LogSetError(rcToCheck=ESMF_RC_ARG_OPT, &
+          msg="totalLBound and totalUBound must be present when totalCount argument is not present", &
+          ESMF_CONTEXT, rcToReturn=rc)
+        return
+      endif
+    endif
+
+    ! Check size of optional totalCount and bounds and fill the local variables
+    if (present(totalLBound)) then
+      if (size(totalLBound)<rank) then
+        call ESMF_LogSetError(rcToCheck=ESMF_RC_ARG_SIZE, &
+          msg="totalLBound argument must be of size rank", &
+          ESMF_CONTEXT, rcToReturn=rc)
+        return
+      endif
+      lb(1:rank) = totalLBound(1:rank)
+    endif
+    if (present(totalUBound)) then
+      if (size(totalUBound)<rank) then
+        call ESMF_LogSetError(rcToCheck=ESMF_RC_ARG_SIZE, &
+          msg="totalUBound argument must be of size rank", &
+          ESMF_CONTEXT, rcToReturn=rc)
+        return
+      endif
+      ub(1:rank) = totalUBound(1:rank)
+    endif
+    if (present(totalCount)) then
+      if (size(totalCount)<rank) then
+        call ESMF_LogSetError(rcToCheck=ESMF_RC_ARG_SIZE, &
+          msg="totalCount argument must be of size rank", &
+          ESMF_CONTEXT, rcToReturn=rc)
+        return
+      endif
+      cnts(1:rank) = totalCount(1:rank)
+    else
+      cnts(1:rank) = ub(1:rank) - lb(1:rank) + 1
+    endif
+    if (.not.present(totalLBound).and..not.present(totalUBound)) then
+      lb(1:rank) = 1
+      ub(1:rank) = cnts(1:rank)
+    else if (.not.present(totalLBound)) then
+      lb(1:rank) = ub(1:rank) - cnts(1:rank) + 1
+    else if (.not.present(totalUBound)) then
+      ub(1:rank) = lb(1:rank) + cnts(1:rank) - 1
+    endif
+
+    ! Check that the local bounds and totalCount variables match
+    do i=1, rank
+      if (cnts(i).ne.(ub(i)-lb(i)+1)) then
+        call ESMF_LogSetError(rcToCheck=ESMF_RC_ARG_VALUE, &
+          msg="totalCount and bounds mismatch detected", &
+          ESMF_CONTEXT, rcToReturn=rc)
+        return
+      endif
+    enddo
+
+    ! Create an initial LocalArray object that must be completed below
+    call c_ESMC_LocalArrayCreateNoData(array, rank, typekind, &
+      ESMF_FROM_FORTRAN, localrc)
+    if (ESMF_LogFoundError(localrc, &
+      ESMF_ERR_PASSTHRU, &
+      ESMF_CONTEXT, rcToReturn=rc)) return
+
+    ! Complete the initial LocalArray object
+    call ESMF_LocalArrConstrF90Ptr(array, cnts, typekind, rank, lb, ub, &
+      rc=localrc)
+    if (ESMF_LogFoundError(localrc, &
+      ESMF_ERR_PASSTHRU, &
+      ESMF_CONTEXT, rcToReturn=rc)) return
+
+    ! Set return value
+    ESMF_LocalArrayCreateByTKR = array
+
+    ! Set init code
+    ESMF_INIT_SET_CREATED(ESMF_LocalArrayCreateByTKR)
+
+    ! Return successfully
+    if (present(rc)) rc = ESMF_SUCCESS
+
+  end function ESMF_LocalArrayCreateByTKR
+!------------------------------------------------------------------------------
+
+
+!------------------------------------------------------------------------------
+^undef  ESMF_METHOD
+^define ESMF_METHOD "ESMF_LocalArrayCreateBySpec"
+!BOP
+! !IROUTINE: ESMF_LocalArrayCreate -- Create a LocalArray by specifying an ArraySpec
+
+! !INTERFACE:
+  ! Private name; call using ESMF_LocalArrayCreate()
+  function ESMF_LocalArrayCreateBySpec(arrayspec, keywordEnforcer, totalCount, &
+    totalLBound, totalUBound, rc)
+!
+! !RETURN VALUE:
+    type(ESMF_LocalArray) :: ESMF_LocalArrayCreateBySpec
+!
+! !ARGUMENTS:
+    type(ESMF_ArraySpec), intent(in)            :: arrayspec
+    type(ESMF_KeywordEnforcer), optional:: keywordEnforcer ! must use keywords below
+    integer,              intent(in),  optional :: totalCount(:)
+    integer,              intent(in),  optional :: totalLBound(:)
+    integer,              intent(in),  optional :: totalUBound(:)
+    integer,              intent(out), optional :: rc
+!
+! !STATUS:
+! \begin{itemize}
+! \item\apiStatusCompatibleVersion{5.2.0r}
+! \end{itemize}
+!
+! !DESCRIPTION:
+!  Create a new {\tt ESMF\_LocalArray} and allocate data space, which remains
+!  uninitialized. The return value is a new LocalArray.
+!
+!  The arguments are:
+!  \begin{description}
+!  \item[arrayspec]
+!    ArraySpec object specifying typekind and rank.
+!  \item[{[totalCount]}]
+!    The number of items in each dimension of the array. This is a 1D
+!    integer array the same length as the rank. The {\tt count} argument may
+!    be omitted if both {\tt totalLBound} and {\tt totalUBound} arguments are present.
+!  \item[{[totalLBound]}]
+!    An integer array of length rank, with the lower index for each dimension.
+!  \item[{[totalUBound]}]
+!    An integer array of length rank, with the upper index for each dimension.
+!  \item[{[rc]}]
+!    Return code; equals {\tt ESMF\_SUCCESS} if there are no errors.
+!  \end{description}
+!
+!EOP
+!------------------------------------------------------------------------------
+    ! Local vars
+    type (ESMF_LocalArray) :: array     ! new C++ LocalArray
+    integer                :: localrc   ! local return code
+    integer :: rank
+    type(ESMF_TypeKind_Flag) :: typekind
+
+    array%this = ESMF_NULL_POINTER
+    ESMF_LocalArrayCreateBySpec = array
+
+    ! Initialize return code; assume routine not implemented
+    if (present(rc)) rc = ESMF_RC_NOT_IMPL
+    localrc = ESMF_RC_NOT_IMPL
+
+    ! Check init status of arguments
+    ESMF_INIT_CHECK_SHALLOW(ESMF_ArraySpecGetInit, arrayspec, rc)
+
+    call ESMF_ArraySpecGet(arrayspec, typekind=typekind, rank=rank, rc=localrc)
+    if (ESMF_LogFoundError(localrc, &
+      ESMF_ERR_PASSTHRU, &
+      ESMF_CONTEXT, rcToReturn=rc)) return
+
+    ! Call the CreateByTKR function to make the array
+    ESMF_LocalArrayCreateBySpec = ESMF_LocalArrayCreateByTKR(typekind, rank, &
+      totalCount=totalCount, totalLBound=totalLBound, totalUBound=totalUBound, rc=localrc)
+    if (ESMF_LogFoundError(localrc, &
+      ESMF_ERR_PASSTHRU, &
+      ESMF_CONTEXT, rcToReturn=rc)) return
+
+    ! Set init code
+    ESMF_INIT_SET_CREATED(ESMF_LocalArrayCreateBySpec)
+
+    ! Return successfully
+    if (present(rc)) rc = ESMF_SUCCESS
+
+  end function ESMF_LocalArrayCreateBySpec
+!------------------------------------------------------------------------------
+
+
+!------------------------------------------------------------------------------
+^undef  ESMF_METHOD
+^define ESMF_METHOD "ESMF_LocalArrayCreateCopy"
+!BOP
+! !IROUTINE: ESMF_LocalArrayCreate -- Create a LocalArray from pre-existing LocalArray
+
+! !INTERFACE:
+  ! Private name; call using ESMF_LocalArrayCreate()
+  function ESMF_LocalArrayCreateCopy(localarray, keywordEnforcer, rc)
+!
+! !RETURN VALUE:
+    type(ESMF_LocalArray) :: ESMF_LocalArrayCreateCopy
+!
+! !ARGUMENTS:
+    type(ESMF_LocalArray), intent(in)            :: localarray
+        type(ESMF_KeywordEnforcer), optional:: keywordEnforcer ! must use keywords below
+    integer,               intent(out), optional :: rc
+!
+! !STATUS:
+! \begin{itemize}
+! \item\apiStatusCompatibleVersion{5.2.0r}
+! \end{itemize}
+!
+! !DESCRIPTION:
+!  Perform a deep copy of an existing {\tt ESMF\_LocalArray} object. The return
+!  value is a new LocalArray.
+!
+!  The arguments are:
+!  \begin{description}
+!  \item[localarray]
+!    Existing LocalArray to be copied.
+!  \item[{[rc]}]
+!    Return code; equals {\tt ESMF\_SUCCESS} if there are no errors.
+!  \end{description}
+!
+!EOP
+!------------------------------------------------------------------------------
+    integer                 :: localrc    ! local return code
+    type(ESMF_LocalArray)   :: localarrayOut  ! opaque pointer to new C++ LocalArray
+
+    ! Initialize return code; assume failure until success is certain
+    localrc = ESMF_RC_NOT_IMPL
+    if (present(rc)) rc = ESMF_RC_NOT_IMPL
+
+    ! Mark this LocalArray object as invalid
+    localarrayOut%this = ESMF_NULL_POINTER
+    ESMF_LocalArrayCreateCopy = localarrayOut
+
+    ! Call into the C++ interface
+    call c_ESMC_LocalArrayCreateCopy(localarray, localarrayOut, localrc)
+    if (ESMF_LogFoundError(localrc, ESMF_ERR_PASSTHRU, &
+      ESMF_CONTEXT, rcToReturn=rc)) return
+
+    ! Set return value
+    ESMF_LocalArrayCreateCopy = localarrayOut
+
+    ! Set init code
+    ESMF_INIT_SET_CREATED(ESMF_LocalArrayCreateCopy)
+
+    ! Return successfully
+    if (present(rc)) rc = ESMF_SUCCESS
+
+  end function ESMF_LocalArrayCreateCopy
+!------------------------------------------------------------------------------
+
+
+#define LocalArrCreateByPtrDoc() \
+!---------------------------------------------------------------------------- @\
+!BOP @\
+! !IROUTINE: ESMF_LocalArrayCreate - Create a LocalArray from a Fortran pointer (associated or unassociated) @\
+! @\
+! !INTERFACE: @\
+! ! Private name; call using ESMF_LocalArrayCreate() @\
+! function ESMF_LocalArrCreateByPtr<rank><type><kind>(farrayPtr, & @\
+!   keywordEnforcer, datacopyflag, totalCount, totalLBound, totalUBound, rc) @\
+! @\
+! !RETURN VALUE: @\
+!   type(ESMF_LocalArray) :: ESMF_LocalArrCreateByPtr<rank><type><kind> @\
+! @\
+! !ARGUMENTS: @\
+!   <type> (ESMF_KIND_<kind>), pointer         :: farrayPtr(<rank>) @\
+!   type(ESMF_KeywordEnforcer), optional:: keywordEnforcer ! must use keywords below @\
+!   type(ESMF_DataCopy_Flag), intent(in),  optional :: datacopyflag @\
+!   integer,             intent(in),  optional :: totalCount(:) @\
+!   integer,             intent(in),  optional :: totalLBound(:) @\
+!   integer,             intent(in),  optional :: totalUBound(:) @\
+!   integer,             intent(out), optional :: rc   @\
+! @\
+! !STATUS: @\
+! \begin{itemize} @\
+! \item\apiStatusCompatibleVersion{5.2.0r} @\
+! \end{itemize} @\
+! @\
+! !DESCRIPTION: @\
+! Creates an {\tt ESMF\_LocalArray} based on a Fortran array pointer. @\
+! Two cases must be distinguished. @\
+! @\
+! First, if {\tt farrayPtr} is associated @\
+! the optional {\tt datacopyflag} argument may be used to indicate whether the @\
+! associated data is to be copied or referenced. For associated {\tt farrayPtr} @\
+! the optional {\tt totalCount}, {\tt totalLBound} and {\tt totalUBound} arguments need @\
+! not be specified. However, all present arguments will be checked against @\
+! {\tt farrayPtr} for consistency. @\
+! @\
+! Second, if {\tt farrayPtr} is unassociated the optional argument {\tt datacopyflag} @\
+! must not be specified. However, in this case a complete set of totalCount and @\
+! bounds information must be provided. Any combination of present {\tt totalCount} @\
+! {\tt totalLBound} and {\tt totalUBound} arguments that provides a complete @\
+! specification is valid. All input information will be checked for @\
+! consistency. @\
+! @\
+! The arguments are: @\
+! \begin{description} @\
+! \item[farrayPtr] @\
+!   A Fortran array pointer (associated or unassociated). @\
+! \item[{[datacopyflag]}] @\
+!   Indicate copy vs. reference behavior in case of associated {\tt farrayPtr}. @\
+!   This argument must {\em not} be present for unassociated {\tt farrayPtr}. @\
+!   Default to {\tt ESMF\_DATACOPY\_REFERENCE}, makes the {\tt ESMF\_LocalArray} @\
+!   reference the associated data array. If set to {\tt ESMF\_DATACOPY\_VALUE} this @\
+!   routine allocates new memory and copies the data from the pointer into @\
+!   the new LocalArray allocation. @\
+! \item[{[totalCount]}] @\
+!   The number of items in each dimension of the array. This is a 1D @\
+!   integer array the same length as the rank. The {\tt count} argument may @\
+!   be omitted if both {\tt totalLBound} and {\tt totalUBound} arguments are present. @\
+! \item[{[totalLBound]}] @\
+!   An integer array of lower index values.  Must be the same length as the rank. @\
+! \item[{[totalUBound]}] @\
+!   An integer array of upper index values.  Must be the same length as the rank. @\
+! \item[{[rc]}] @\
+!   Return code; equals {\tt ESMF\_SUCCESS} if there are no errors. @\
+! \end{description} @\
+! @\
+!EOP @\
+!---------------------------------------------------------------------------- @\
+
+#define LocalArrCreateByPtrMacro(mname, mtypekind, mrank, mdim, mlen, mrng, mloc) \
+!---------------------------------------------------------------------------- @\
+^undef  ESMF_METHOD @\
+!define ESMF_METHOD "ESMF_LocalArrCreateByPtr##mrank##D##mtypekind" @\
+^define ESMF_METHOD "ESMF_LocalArrCreateByPtr" @\
+  function ESMF_LocalArrCreateByPtr##mrank##D##mtypekind(farrayPtr, & @\
+    keywordEnforcer, datacopyflag, totalCount, totalLBound, totalUBound, rc) @\
+ @\
+    type(ESMF_LocalArray) :: ESMF_LocalArrCreateByPtr##mrank##D##mtypekind @\
+ @\
+    mname (ESMF_KIND_##mtypekind), dimension(mdim), pointer :: farrayPtr @\
+        type(ESMF_KeywordEnforcer), optional:: keywordEnforcer ! must use keywords below @\
+    type(ESMF_DataCopy_Flag), intent(in), optional :: datacopyflag @\
+    integer, dimension(:), intent(in), optional :: totalCount @\
+    integer, dimension(:), intent(in), optional :: totalLBound @\
+    integer, dimension(:), intent(in), optional :: totalUBound @\
+    integer, intent(out), optional :: rc   @\
+ @\
+    ! Local variables @\
+    type (ESMF_LocalArray)          :: array    ! new array object @\
+    integer                         :: localrc  ! local return code @\
+    type (ESMF_DataCopy_Flag)       :: copy     ! do we copy or ref? @\
+    integer, dimension(mrank)       :: cnts     ! local totalCount @\
+    integer, dimension(mrank)       :: lb, ub   ! local bounds @\
+    integer:: i @\
+ @\
+    ! Initialize return code; assume routine not implemented @\
+    if (present(rc)) rc = ESMF_RC_NOT_IMPL @\
+ @\
+    array%this = ESMF_NULL_POINTER @\
+    ESMF_LocalArrCreateByPtr##mrank##D##mtypekind = array @\
+ @\
+    ! Test to see if farrayPtr is associated and check consistency of arguments @\
+    if (associated(farrayPtr)) then @\
+      ! Get sizes from current F90 array, to check args @\
+      cnts = shape(farrayPtr) @\
+      lb = lbound(farrayPtr) @\
+      ub = ubound(farrayPtr) @\
+      ! Set default for datacopyflag @\
+      if (present(datacopyflag)) then @\
+        copy = datacopyflag @\
+      else @\
+        copy = ESMF_DATACOPY_REFERENCE @\
+      endif @\
+    else @\
+      if (present(datacopyflag)) then @\
+        call ESMF_LogSetError(rcToCheck=ESMF_RC_ARG_OPT, & @\
+          msg="datacopyflag argument is only allowed with associated farrayPtr argument", & @\
+          ESMF_CONTEXT, rcToReturn=rc) @\
+        return @\
+      endif @\
+      copy = ESMF_DATA_SPACE @\
+    endif @\
+ @\
+    ! Check that enough info from totalCount, totalLBound and totalUBound is present @\
+    if (.not.associated(farrayPtr) .and. .not.present(totalCount)) then @\
+      if (.not.present(totalLBound) .or. .not.present(totalUBound)) then @\
+        call ESMF_LogSetError(rcToCheck=ESMF_RC_ARG_OPT, & @\
+          msg="totalLBound and totalUBound must be present when totalCount argument is not present", & @\
+          ESMF_CONTEXT, rcToReturn=rc) @\
+        return @\
+      endif @\
+    endif @\
+ @\
+    ! Check size of optional totalCount and bounds and fill the local variables @\
+    if (present(totalLBound)) then @\
+      if (size(totalLBound)<mrank) then @\
+        call ESMF_LogSetError(rcToCheck=ESMF_RC_ARG_SIZE, & @\
+          msg="totalLBound argument must be of size rank", & @\
+          ESMF_CONTEXT, rcToReturn=rc) @\
+        return @\
+      endif @\
+      if (associated(farrayPtr)) then @\
+        do i=1, mrank @\
+          if (lb(i) .ne. totalLBound(i)) then @\
+            call ESMF_LogSetError(rcToCheck=ESMF_RC_ARG_INCOMP, & @\
+              msg="provided totalLBound are incompatible with associated farrayPtr", & @\
+              ESMF_CONTEXT, rcToReturn=rc) @\
+            return @\
+          endif @\
+        enddo @\
+      else @\
+        lb(1:mrank) = totalLBound(1:mrank) @\
+      endif @\
+    endif @\
+    if (present(totalUBound)) then @\
+      if (size(totalUBound)<mrank) then @\
+        call ESMF_LogSetError(rcToCheck=ESMF_RC_ARG_SIZE, & @\
+          msg="totalUBound argument must be of size rank", & @\
+          ESMF_CONTEXT, rcToReturn=rc) @\
+        return @\
+      endif @\
+      if (associated(farrayPtr)) then @\
+        do i=1, mrank @\
+          if (ub(i) .ne. totalUBound(i)) then @\
+            call ESMF_LogSetError(rcToCheck=ESMF_RC_ARG_INCOMP, & @\
+              msg="provided totalUBound are incompatible with associated farrayPtr", & @\
+              ESMF_CONTEXT, rcToReturn=rc) @\
+            return @\
+          endif @\
+        enddo @\
+      else @\
+        ub(1:mrank) = totalUBound(1:mrank) @\
+      endif @\
+    endif @\
+    if (present(totalCount)) then @\
+      if (size(totalCount)<mrank) then @\
+        call ESMF_LogSetError(rcToCheck=ESMF_RC_ARG_SIZE, & @\
+          msg="totalCount argument must be of size rank", & @\
+          ESMF_CONTEXT, rcToReturn=rc) @\
+        return @\
+      endif @\
+      if (associated(farrayPtr)) then @\
+        do i=1, mrank @\
+          if (cnts(i) .ne. totalCount(i)) then @\
+            call ESMF_LogSetError(rcToCheck=ESMF_RC_ARG_INCOMP, & @\
+              msg="provided totalCount are incompatible with associated farrayPtr", & @\
+              ESMF_CONTEXT, rcToReturn=rc) @\
+            return @\
+          endif @\
+        enddo @\
+      else @\
+        cnts(1:mrank) = totalCount(1:mrank) @\
+      endif @\
+    else if (.not.associated(farrayPtr)) then @\
+      cnts(1:mrank) = ub(1:mrank) - lb(1:mrank) + 1  @\
+    endif @\
+    if (.not.associated(farrayPtr)) then @\
+      if (.not.present(totalLBound) .and. .not.present(totalUBound)) then @\
+        lb(1:mrank) = 1 @\
+        ub(1:mrank) = cnts(1:mrank) @\
+      else if (.not.present(totalLBound)) then @\
+        lb(1:mrank) = ub(1:mrank) - cnts(1:mrank) + 1 @\
+      else if (.not.present(totalUBound)) then @\
+        ub(1:mrank) = lb(1:mrank) + cnts(1:mrank) - 1 @\
+      endif @\
+    endif @\
+ @\
+    ! Check that the local bounds and totalCount variables match @\
+    do i=1, mrank @\
+      if (cnts(i) .ne. (ub(i)-lb(i)+1)) then @\
+        call ESMF_LogSetError(rcToCheck=ESMF_RC_ARG_VALUE, & @\
+          msg="totalCount and bounds mismatch detected", & @\
+          ESMF_CONTEXT, rcToReturn=rc) @\
+        return @\
+      endif @\
+    enddo @\
+ @\
+    ! Call create routine @\
+    call c_ESMC_LocalArrayCreateNoData(array, mrank, ESMF_TYPEKIND_##mtypekind, & @\
+      ESMF_FROM_FORTRAN, localrc) @\
+    if (ESMF_LogFoundError(localrc, & @\
+      ESMF_ERR_PASSTHRU, & @\
+      ESMF_CONTEXT, rcToReturn=rc)) return @\
+ @\
+    call ESMF_LocalArrConstrF90Ptr##mrank##D##mtypekind(array, cnts, farrayPtr,& @\
+      copy, lb, ub, rc=localrc) @\
+    if (ESMF_LogFoundError(localrc, & @\
+      ESMF_ERR_PASSTHRU, & @\
+      ESMF_CONTEXT, rcToReturn=rc)) return @\
+ @\
+    ! return value set by c_ESMC func above @\
+    ESMF_LocalArrCreateByPtr##mrank##D##mtypekind = array @\
+ @\
+    ! Set init code  @\
+    ESMF_INIT_SET_CREATED(ESMF_LocalArrCreateByPtr##mrank##D##mtypekind) @\
+ @\
+    ! return successfully @\
+    if (present(rc)) rc = ESMF_SUCCESS @\
+ @\
+  end function ESMF_LocalArrCreateByPtr##mrank##D##mtypekind   @\
+ @\
+!---------------------------------------------------------------------------- @\
+
+TypeKindRankDeclarationMacro(LocalArrCreateByPtr)
+
+
+!------------------------------------------------------------------------------
+^undef  ESMF_METHOD
+^define ESMF_METHOD "ESMF_LocalArrayDestroy"
+!BOP
+! !IROUTINE: ESMF_LocalArrayDestroy - Release resources associated with a LocalArray
+!
+! !INTERFACE:
+  subroutine ESMF_LocalArrayDestroy(localarray, keywordEnforcer, rc)
+!
+! !ARGUMENTS:
+    type(ESMF_LocalArray),  intent(inout)           :: localarray
+        type(ESMF_KeywordEnforcer), optional:: keywordEnforcer ! must use keywords below
+    integer,                intent(out),  optional  :: rc
+!
+! !STATUS:
+! \begin{itemize}
+! \item\apiStatusCompatibleVersion{5.2.0r}
+! \end{itemize}
+!
+! !DESCRIPTION:
+!   Destroys an {\tt ESMF\_LocalArray}, releasing all resources associated
+!   with the object.
+!
+!   The arguments are:
+!   \begin{description}
+!   \item[localarray]
+!     Destroy contents of this {\tt ESMF\_LocalArray}.
+!   \item[[rc]]
+!     Return code; equals {\tt ESMF\_SUCCESS} if there are no errors.
+!   \end{description}
+!
+!EOP
+!------------------------------------------------------------------------------
+    ! Local vars
+    integer :: localrc                  ! local return code
+    type(ESMF_Logical) :: dealloc       ! do we need to free space?
+    type(ESMF_TypeKind_Flag) :: typekind
+    integer :: rank
+
+!  To reduce the depth of crossings of the F90/C++ boundary we first
+!   query to see if we are responsible for deleting the data space.  If so,
+!   first deallocate the space and then call the C++ code to release
+!   the object space.  When it returns we are done and can return to the user.
+!   Otherwise we would need to make a nested call back into F90 from C++ to do
+!   the deallocate() during the object delete.
+
+    ! Initialize return code; assume routine not implemented
+    if (present(rc)) rc = ESMF_RC_NOT_IMPL
+    localrc = ESMF_RC_NOT_IMPL
+
+    ! Check init status of arguments
+    ESMF_INIT_CHECK_DEEP(ESMF_LocalArrayGetInit, localarray, rc)
+
+    ! TODO: document the current rule - if we do the allocate in
+    !   the case of ESMF_DATACOPY_VALUE at create time then we delete the
+    !   space.  otherwise, the user needs to destroy the array
+    !   (we will ignore the data) and call deallocate themselves.
+
+    call c_ESMC_LocalArrayGetDealloc(localarray, dealloc, localrc)
+    if (ESMF_LogFoundError(localrc, &
+      ESMF_ERR_PASSTHRU, &
+      ESMF_CONTEXT, rcToReturn=rc)) return
+    if (dealloc.eq.ESMF_TRUE) then
+      call c_ESMC_LocalArrayGetRank(localarray, rank, localrc)
+      if (ESMF_LogFoundError(localrc, &
+        ESMF_ERR_PASSTHRU, &
+        ESMF_CONTEXT, rcToReturn=rc)) return
+      call c_ESMC_LocalArrayGetTypeKind(localarray, typekind, localrc)
+      if (ESMF_LogFoundError(localrc, &
+        ESMF_ERR_PASSTHRU, &
+        ESMF_CONTEXT, rcToReturn=rc)) return
+      call ESMF_LocalArrayF90Deallocate(localarray, typekind, rank, rc=localrc)
+      if (ESMF_LogFoundError(localrc, &
+        ESMF_ERR_PASSTHRU, &
+        ESMF_CONTEXT, rcToReturn=rc)) return
+      call c_ESMC_LocalArraySetDealloc(localarray, ESMF_FALSE, localrc)
+      if (ESMF_LogFoundError(localrc, &
+        ESMF_ERR_PASSTHRU, &
+        ESMF_CONTEXT, rcToReturn=rc)) return
+    endif
+
+    ! Calling deallocate first means this will not return back to F90
+    !  before returning for good.
+    call c_ESMC_LocalArrayDestroy(localarray, localrc)
+    if (ESMF_LogFoundError(localrc, &
+      ESMF_ERR_PASSTHRU, &
+      ESMF_CONTEXT, rcToReturn=rc)) return
+
+    ! Set init code
+    ESMF_INIT_SET_DELETED(localarray)
+
+    ! Return successfully
+    if (present(rc)) rc = ESMF_SUCCESS
+
+  end subroutine ESMF_LocalArrayDestroy
+!------------------------------------------------------------------------------
+
+
+!------------------------------------------------------------------------------
+^undef  ESMF_METHOD
+^define ESMF_METHOD "ESMF_LocalArrConstrF90Ptr"
+!BOPI
+! !IROUTINE: ESMF_LocalArrConstrF90Ptr - Create and add F90 ptr to array
+
+! !INTERFACE:
+  subroutine ESMF_LocalArrConstrF90Ptr(array, totalCount, typekind, rank, &
+    totalLBound, totalUBound, rc)
+!
+! !ARGUMENTS:
+    type(ESMF_LocalArray),    intent(inout)         :: array
+    integer, dimension(:),    intent(in)            :: totalCount
+    type(ESMF_TypeKind_Flag), intent(in)            :: typekind
+    integer,                  intent(in)            :: rank
+    integer, dimension(:),    intent(in)            :: totalLBound
+    integer, dimension(:),    intent(in)            :: totalUBound
+    integer,                  intent(out), optional :: rc
+!
+! !DESCRIPTION:
+!  Take a partially created {\tt ESMF\_LocalArray} and T/K/R information and
+!  finish constructiong the LocalArray object.
+!
+!  The arguments are:
+!  \begin{description}
+!  \item[array]
+!    Partially created {\tt ESMF\_LocalArray} object.  This entry point is used
+!    during both the C++ and F90 create calls if we need to create an F90
+!    pointer to be used later.
+!  \item[totalCount]
+!    The number of items in each dimension of the array.  This is a 1D
+!    integer array the same length as the rank.
+!  \item[rank]
+!    Array rank.
+!    This must match what is already in the array - it is here only as
+!    a convienience.
+!  \item[typekind]
+!    Array typetypekind.
+!    This must match what is already in the array - it is here only as
+!    a convienience.
+!   \item[totalLBound]
+!    The lower index values per rank.
+!   \item[totalUBound]
+!    The upper index values per rank.
+!   \item[{[rc]}]
+!    Return code; equals {\tt ESMF\_SUCCESS} if there are no errors.
+!   \end{description}
+!
+!EOPI
+!------------------------------------------------------------------------------
+    ! Local vars
+    integer :: localrc                  ! local return code
+    integer :: localtk
+
+    ! Initialize return code; assume routine not implemented
+    localrc = ESMF_RC_NOT_IMPL
+    if (present(rc)) rc = ESMF_RC_NOT_IMPL
+
+    ! Cannot check init status of array argument here because
+    ! the array object is only partially created at this point
+
+    localtk = typekind%dkind
+
+    ! Call a T/K/R specific interface in order to create the proper
+    !  type of F90 pointer, allocate the space, set the values in the
+    !  Local Array object, and return.  (The routine this code is calling is
+    !  generated by macro.)
+
+    !! calling routines generated from macros by the preprocessor
+
+    select case (localtk)
+^ifndef ESMF_NO_INTEGER_1_BYTE
+      case (ESMF_TYPEKIND_I1%dkind)
+        select case (rank)
+          case (1)
+            call ESMF_LocalArrConstrF90Ptr1DI1(array, totalCount, &
+              totalLBound=totalLBound, totalUBound=totalUBound, rc=localrc)
+          case (2)
+            call ESMF_LocalArrConstrF90Ptr2DI1(array, totalCount, &
+              totalLBound=totalLBound, totalUBound=totalUBound, rc=localrc)
+          case (3)
+            call ESMF_LocalArrConstrF90Ptr3DI1(array, totalCount, &
+              totalLBound=totalLBound, totalUBound=totalUBound, rc=localrc)
+          case (4)
+            call ESMF_LocalArrConstrF90Ptr4DI1(array, totalCount, &
+              totalLBound=totalLBound, totalUBound=totalUBound, rc=localrc)
+^ifndef ESMF_NO_GREATER_THAN_4D
+          case (5)
+            call ESMF_LocalArrConstrF90Ptr5DI1(array, totalCount, &
+              totalLBound=totalLBound, totalUBound=totalUBound, rc=localrc)
+          case (6)
+            call ESMF_LocalArrConstrF90Ptr6DI1(array, totalCount, &
+              totalLBound=totalLBound, totalUBound=totalUBound, rc=localrc)
+          case (7)
+            call ESMF_LocalArrConstrF90Ptr7DI1(array, totalCount, &
+              totalLBound=totalLBound, totalUBound=totalUBound, rc=localrc)
+^endif
+          case default
+            if (ESMF_LogFoundError(ESMF_RC_ARG_BAD, &
+              msg="Unsupported rank", &
+              ESMF_CONTEXT, rcToReturn=rc)) return
+        end select
+^endif
+^ifndef ESMF_NO_INTEGER_2_BYTE
+      case (ESMF_TYPEKIND_I2%dkind)
+        select case(rank)
+          case (1)
+            call ESMF_LocalArrConstrF90Ptr1DI2(array, totalCount, &
+              totalLBound=totalLBound, totalUBound=totalUBound, rc=localrc)
+          case (2)
+            call ESMF_LocalArrConstrF90Ptr2DI2(array, totalCount, &
+              totalLBound=totalLBound, totalUBound=totalUBound, rc=localrc)
+          case (3)
+            call ESMF_LocalArrConstrF90Ptr3DI2(array, totalCount, &
+              totalLBound=totalLBound, totalUBound=totalUBound, rc=localrc)
+          case (4)
+            call ESMF_LocalArrConstrF90Ptr4DI2(array, totalCount, &
+              totalLBound=totalLBound, totalUBound=totalUBound, rc=localrc)
+^ifndef ESMF_NO_GREATER_THAN_4D
+          case (5)
+            call ESMF_LocalArrConstrF90Ptr5DI2(array, totalCount, &
+              totalLBound=totalLBound, totalUBound=totalUBound, rc=localrc)
+          case (6)
+            call ESMF_LocalArrConstrF90Ptr6DI2(array, totalCount, &
+              totalLBound=totalLBound, totalUBound=totalUBound, rc=localrc)
+          case (7)
+            call ESMF_LocalArrConstrF90Ptr7DI2(array, totalCount, &
+              totalLBound=totalLBound, totalUBound=totalUBound, rc=localrc)
+^endif
+          case default
+            if (ESMF_LogFoundError(ESMF_RC_ARG_BAD, &
+              msg="Unsupported rank", &
+              ESMF_CONTEXT, rcToReturn=rc)) return
+        end select
+^endif
+      case (ESMF_TYPEKIND_I4%dkind)
+        select case(rank)
+          case (1)
+            call ESMF_LocalArrConstrF90Ptr1DI4(array, totalCount, &
+              totalLBound=totalLBound, totalUBound=totalUBound, rc=localrc)
+          case (2)
+            call ESMF_LocalArrConstrF90Ptr2DI4(array, totalCount, &
+              totalLBound=totalLBound, totalUBound=totalUBound, rc=localrc)
+          case (3)
+            call ESMF_LocalArrConstrF90Ptr3DI4(array, totalCount, &
+              totalLBound=totalLBound, totalUBound=totalUBound, rc=localrc)
+          case (4)
+            call ESMF_LocalArrConstrF90Ptr4DI4(array, totalCount, &
+              totalLBound=totalLBound, totalUBound=totalUBound, rc=localrc)
+^ifndef ESMF_NO_GREATER_THAN_4D
+          case (5)
+            call ESMF_LocalArrConstrF90Ptr5DI4(array, totalCount, &
+              totalLBound=totalLBound, totalUBound=totalUBound, rc=localrc)
+          case (6)
+            call ESMF_LocalArrConstrF90Ptr6DI4(array, totalCount, &
+              totalLBound=totalLBound, totalUBound=totalUBound, rc=localrc)
+          case (7)
+            call ESMF_LocalArrConstrF90Ptr7DI4(array, totalCount, &
+              totalLBound=totalLBound, totalUBound=totalUBound, rc=localrc)
+^endif
+          case default
+            if (ESMF_LogFoundError(ESMF_RC_ARG_BAD, &
+              msg="Unsupported rank", &
+              ESMF_CONTEXT, rcToReturn=rc)) return
+        end select
+      case (ESMF_TYPEKIND_I8%dkind)
+        select case(rank)
+          case (1)
+            call ESMF_LocalArrConstrF90Ptr1DI8(array, totalCount, &
+              totalLBound=totalLBound, totalUBound=totalUBound, rc=localrc)
+          case (2)
+            call ESMF_LocalArrConstrF90Ptr2DI8(array, totalCount, &
+              totalLBound=totalLBound, totalUBound=totalUBound, rc=localrc)
+          case (3)
+            call ESMF_LocalArrConstrF90Ptr3DI8(array, totalCount, &
+              totalLBound=totalLBound, totalUBound=totalUBound, rc=localrc)
+          case (4)
+            call ESMF_LocalArrConstrF90Ptr4DI8(array, totalCount, &
+              totalLBound=totalLBound, totalUBound=totalUBound, rc=localrc)
+^ifndef ESMF_NO_GREATER_THAN_4D
+          case (5)
+            call ESMF_LocalArrConstrF90Ptr5DI8(array, totalCount, &
+              totalLBound=totalLBound, totalUBound=totalUBound, rc=localrc)
+          case (6)
+            call ESMF_LocalArrConstrF90Ptr6DI8(array, totalCount, &
+              totalLBound=totalLBound, totalUBound=totalUBound, rc=localrc)
+          case (7)
+            call ESMF_LocalArrConstrF90Ptr7DI8(array, totalCount, &
+              totalLBound=totalLBound, totalUBound=totalUBound, rc=localrc)
+^endif
+          case default
+            if (ESMF_LogFoundError(ESMF_RC_ARG_BAD, &
+              msg="Unsupported rank", &
+              ESMF_CONTEXT, rcToReturn=rc)) return
+        end select
+      case (ESMF_TYPEKIND_R4%dkind)
+        select case(rank)
+          case (1)
+            call ESMF_LocalArrConstrF90Ptr1DR4(array, totalCount, &
+              totalLBound=totalLBound, totalUBound=totalUBound, rc=localrc)
+          case (2)
+            call ESMF_LocalArrConstrF90Ptr2DR4(array, totalCount, &
+              totalLBound=totalLBound, totalUBound=totalUBound, rc=localrc)
+          case (3)
+            call ESMF_LocalArrConstrF90Ptr3DR4(array, totalCount, &
+              totalLBound=totalLBound, totalUBound=totalUBound, rc=localrc)
+          case (4)
+            call ESMF_LocalArrConstrF90Ptr4DR4(array, totalCount, &
+              totalLBound=totalLBound, totalUBound=totalUBound, rc=localrc)
+^ifndef ESMF_NO_GREATER_THAN_4D
+          case (5)
+            call ESMF_LocalArrConstrF90Ptr5DR4(array, totalCount, &
+              totalLBound=totalLBound, totalUBound=totalUBound, rc=localrc)
+          case (6)
+            call ESMF_LocalArrConstrF90Ptr6DR4(array, totalCount, &
+              totalLBound=totalLBound, totalUBound=totalUBound, rc=localrc)
+          case (7)
+            call ESMF_LocalArrConstrF90Ptr7DR4(array, totalCount, &
+              totalLBound=totalLBound, totalUBound=totalUBound, rc=localrc)
+^endif
+          case default
+            if (ESMF_LogFoundError(ESMF_RC_ARG_BAD, &
+              msg="Unsupported rank", &
+              ESMF_CONTEXT, rcToReturn=rc)) return
+        end select
+      case (ESMF_TYPEKIND_R8%dkind)
+        select case(rank)
+          case (1)
+            call ESMF_LocalArrConstrF90Ptr1DR8(array, totalCount, &
+              totalLBound=totalLBound, totalUBound=totalUBound, rc=localrc)
+          case (2)
+            call ESMF_LocalArrConstrF90Ptr2DR8(array, totalCount, &
+              totalLBound=totalLBound, totalUBound=totalUBound, rc=localrc)
+          case (3)
+            call ESMF_LocalArrConstrF90Ptr3DR8(array, totalCount, &
+              totalLBound=totalLBound, totalUBound=totalUBound, rc=localrc)
+          case (4)
+            call ESMF_LocalArrConstrF90Ptr4DR8(array, totalCount, &
+              totalLBound=totalLBound, totalUBound=totalUBound, rc=localrc)
+^ifndef ESMF_NO_GREATER_THAN_4D
+          case (5)
+            call ESMF_LocalArrConstrF90Ptr5DR8(array, totalCount, &
+              totalLBound=totalLBound, totalUBound=totalUBound, rc=localrc)
+          case (6)
+            call ESMF_LocalArrConstrF90Ptr6DR8(array, totalCount, &
+              totalLBound=totalLBound, totalUBound=totalUBound, rc=localrc)
+          case (7)
+            call ESMF_LocalArrConstrF90Ptr7DR8(array, totalCount, &
+              totalLBound=totalLBound, totalUBound=totalUBound, rc=localrc)
+^endif
+          case default
+            if (ESMF_LogFoundError(ESMF_RC_ARG_BAD, &
+              msg="Unsupported rank", &
+              ESMF_CONTEXT, rcToReturn=rc)) return
+        end select
+      case default
+        if (ESMF_LogFoundError(ESMF_RC_ARG_BAD, &
+          msg="Unsupported typekind", &
+          ESMF_CONTEXT, rcToReturn=rc)) return
+    end select
+
+    ! Return successfully
+    if (present(rc)) rc = ESMF_SUCCESS
+
+  end subroutine ESMF_LocalArrConstrF90Ptr
+!------------------------------------------------------------------------------
+
+
+#define LocalArrConstrF90PtrDoc() \
+!---------------------------------------------------------------------------- @\
+!BOPI @\
+! !IROUTINE: ESMF_LocalArrConstrF90Ptr<rank><type><kind> - Create a Fortran Ptr of the proper T/K/R @\
+! @\
+! !INTERFACE: @\
+!      subroutine ESMF_LocalArrConstrF90Ptr<rank><type><kind>(array, totalCount, farrayPtr, datacopyflag, totalLBound, totalUBound, rc) @\
+! @\
+! !ARGUMENTS: @\
+!      type(ESMF_LocalArray), intent(inout) :: array @\
+!      integer, dimension(:), intent(in) :: totalCount @\
+!      <type> (ESMF_KIND_<kind>), dimension(<rank>), pointer, optional :: farrayPtr  @\
+!      type(ESMF_DataCopy_Flag), intent(in), optional :: datacopyflag @\
+!      integer, dimension(:), intent(in), optional :: totalLBound @\
+!      integer, dimension(:), intent(in), optional :: totalUBound @\
+!      integer, intent(out), optional :: rc   @\
+! @\
+! !DESCRIPTION: @\
+!  Creates a Fortran Pointer of the requested T/K/R.  After creating the @\
+!  pointer and doing the allocation based on totalCount, also goes ahead and @\
+!  calls into the C++ interfaces to set values on the {\tt ESMF\_LocalArray} @\
+!  object. (This is to save on the total number of nested crossings of the @\
+!  F90/C++ boundary.) @\
+! Valid type/kind/rank combinations supported by the @\
+! framework are: ranks 1 to 7, type real of kind *4 or *8, @\
+! and type integer of kind *1, *2, *4, or *8. @\
+! @\
+!  Optional args are an existing Fortran pointer which if given is used @\
+!  instead of a new one, and a datacopyflag flag which if set to copy will @\
+!  do a contents copy or reference. @\
+! @\
+! The arguments are: @\
+!  \begin{description} @\
+!  \item[array] @\
+!   The {\tt ESMF\_LocalArray} to set the values into. @\
+!  \item[totalCount] @\
+!   An integer array of totalCount.  Must be the same length as the rank. @\
+!  \item[{[farrayPtr]}] @\
+!   An optional existing Fortran pointer.  Will be used instead of an @\
+!   internally generated Fortran pointer if given.  Must be given if the @\
+!   {\tt datacopyflag} is specified. @\
+!  \item[{[datacopyflag]}] @\
+!   An optional copy flag which can be specified if a Fortran pointer is also @\
+!   given.  Can either make a new copy of the data or ref existing data. @\
+!  \item[{[totalLBound]}] @\
+!  An integer array of lower index values.  Must be same length as the rank. @\
+!  \item[{[totalUBound]}] @\
+! An integer array of upper index values.  Must be same length as the rank. @\
+!  \item[{[rc]}] @\
+!    Return code; equals {\tt ESMF\_SUCCESS} if there are no errors. @\
+!  \end{description} @\
+! @\
+!EOPI @\
+!---------------------------------------------------------------------------- @\
+ @\
+
+#define LocalArrConstrF90PtrMacro(mname, mtypekind, mrank, mdim, mlen, mrng, mloc) \
+!---------------------------------------------------------------------------- @\
+^undef  ESMF_METHOD @\
+!define ESMF_METHOD "ESMF_LocalArrConstrF90Ptr##mrank##D##mtypekind" @\
+^define ESMF_METHOD "ESMF_LocalArrConstrF90Ptr" @\
+ @\
+  subroutine ESMF_LocalArrConstrF90Ptr##mrank##D##mtypekind(array, totalCount, & @\
+    farrayPtr, datacopyflag, totalLBound, totalUBound, rc) @\
+ @\
+    type(ESMF_LocalArray), intent(inout) :: array @\
+    integer, dimension(:), intent(in) :: totalCount @\
+    mname (ESMF_KIND_##mtypekind), dimension(mdim), pointer, optional :: farrayPtr  @\
+    type(ESMF_DataCopy_Flag), intent(in), optional :: datacopyflag @\
+    integer, dimension(:), intent(in), optional :: totalLBound @\
+    integer, dimension(:), intent(in), optional :: totalUBound @\
+    integer, intent(out), optional :: rc   @\
+ @\
+    ! Local variables @\
+    integer :: localrc                  ! local return code @\
+    logical :: willalloc                ! do we need to alloc/dealloc? @\
+    logical :: willcopy                 ! do we need to copy data? @\
+    type(ESMF_Logical) :: do_dealloc    ! dealloc flag for SetInternal call @\
+ @\
+    type (ESMF_LAWrap##mrank##D##mtypekind) :: wrap ! to pass f90 ptr to C++ @\
+    mname (ESMF_KIND_##mtypekind), dimension(mdim), pointer :: newp  @\
+    integer, dimension(ESMF_MAXDIM) :: lb, ub @\
+    integer, dimension(ESMF_MAXDIM) :: offsets @\
+ @\
+    ! Initialize return code; assume routine not implemented @\
+    localrc = ESMF_RC_NOT_IMPL @\
+    if (present(rc)) rc = ESMF_RC_NOT_IMPL @\
+ @\
+    ! Assume defaults first, then alter if lb or ub specified, @\
+    ! or if an existing pointer is given and can be queried. @\
+    lb(:) = 1 @\
+    ub(1:size(totalCount)) = totalCount @\
+ @\
+    ! Decide if we need to do: make a new allocation, copy existing data @\
+    if (.not. present(farrayPtr)) then @\
+       nullify(newp) @\
+       willalloc = .true. @\
+       willcopy = .false. @\
+       do_dealloc = ESMF_TRUE @\
+    else @\
+      if (present(datacopyflag)) then @\
+       if (datacopyflag .eq. ESMF_DATA_SPACE) then @\
+           newp => farrayPtr    ! ptr alias, important this be =>  @\
+           lb(1:size(totalCount)) = lbound(farrayPtr) @\
+           ub(1:size(totalCount)) = ubound(farrayPtr) @\
+           willalloc = .true. @\
+           willcopy = .false. @\
+           do_dealloc = ESMF_TRUE @\
+       else if (datacopyflag .eq. ESMF_DATACOPY_VALUE) then @\
+           nullify(newp) @\
+           willalloc = .true. @\
+           willcopy = .true. @\
+           do_dealloc = ESMF_TRUE @\
+       else       ! ESMF_DATACOPY_REFERENCE @\
+           newp => farrayPtr    ! ptr alias, important this be =>  @\
+           lb(1:size(totalCount)) = lbound(farrayPtr) @\
+           ub(1:size(totalCount)) = ubound(farrayPtr) @\
+           willalloc = .false. @\
+           willcopy = .false. @\
+           do_dealloc = ESMF_FALSE @\
+       endif @\
+      else @\
+           newp => farrayPtr    ! ptr alias, important this be =>  @\
+           lb(1:size(totalCount)) = lbound(farrayPtr) @\
+           ub(1:size(totalCount)) = ubound(farrayPtr) @\
+           willalloc = .false. @\
+           willcopy = .false. @\
+           do_dealloc = ESMF_FALSE @\
+      endif @\
+    endif @\
+ @\
+    ! totalLBound, if given, should be used @\
+    if (present(totalLBound)) then @\
+        lb(1:size(totalLBound)) = totalLBound @\
+    endif @\
+ @\
+    ! ub is only used during allocation @\
+    if (willalloc) then @\
+        if (present(totalUBound)) then @\
+            ub(1:size(totalUBound)) = totalUBound @\
+        endif @\
+        allocate(newp(mrng), stat=localrc) @\
+        if (ESMF_LogFoundAllocError(localrc, & @\
+          msg="LocalArray data space", & @\
+          ESMF_CONTEXT, rcToReturn=rc)) return @\
+    endif @\
+ @\
+    if (willcopy) then @\
+        newp = farrayPtr      ! contents copy, important that this be = @\
+    endif @\
+ @\
+    ! Now set all the new accumulated information about the array - the @\
+    ! Fortran pointer, the base addr, the totalCount, etc. @\
+ @\
+    ! Until we need offsets, use 0. @\
+    offsets = 0 @\
+ @\
+    wrap%ptr##mrank##D##mtypekind => newp @\
+    if (size(newp) .ne. 0) then @\
+      call c_ESMC_LocalArraySetInfo(array, wrap, & @\
+                             ESMF_DATA_ADDRESS(newp(mloc)), totalCount, & @\
+                             lb, ub, offsets, & @\
+                             ESMF_TRUE, do_dealloc, localrc) @\
+      if (ESMF_LogFoundError(localrc, & @\
+        ESMF_ERR_PASSTHRU, & @\
+        ESMF_CONTEXT, rcToReturn=rc)) return @\
+    else @\
+      call c_ESMC_LocalArraySetInfo(array, wrap, & @\
+                             ESMF_NULL_POINTER, totalCount, & @\
+                             lb, ub, offsets, & @\
+                             ESMF_TRUE, do_dealloc, localrc) @\
+      if (ESMF_LogFoundError(localrc, & @\
+        ESMF_ERR_PASSTHRU, & @\
+        ESMF_CONTEXT, rcToReturn=rc)) return @\
+    endif @\
+ @\
+    ! Return successfully @\
+    if (present(rc)) rc = ESMF_SUCCESS @\
+ @\
+  end subroutine ESMF_LocalArrConstrF90Ptr##mrank##D##mtypekind  @\
+ @\
+!---------------------------------------------------------------------------- @\
+
+TypeKindRankDeclarationMacro(LocalArrConstrF90Ptr)
+
+
+!------------------------------------------------------------------------------
+^undef  ESMF_METHOD
+^define ESMF_METHOD "ESMF_LocalArrCToF90Ptr"
+!BOPI
+! !IROUTINE: ESMF_LocalArrCToF90Ptr - Convert C to F90 ptr and put into array
+
+! !INTERFACE:
+  subroutine ESMF_LocalArrCToF90Ptr(array, cptr, totalCount, typekind, rank, &
+    totalLBound, totalUBound, rc)
+!
+! !ARGUMENTS:
+    type(ESMF_LocalArray),    intent(inout)         :: array
+    type(C_PTR),              intent(in)            :: cptr
+    integer, dimension(:),    intent(in)            :: totalCount
+    type(ESMF_TypeKind_Flag), intent(in)            :: typekind
+    integer,                  intent(in)            :: rank
+    integer, dimension(:),    intent(in)            :: totalLBound
+    integer, dimension(:),    intent(in)            :: totalUBound
+    integer,                  intent(out), optional :: rc
+!
+! !DESCRIPTION:
+!  Take a partially created {\tt ESMF\_LocalArray} and T/K/R information and
+!  finish constructiong the LocalArray object.
+!
+!  The arguments are:
+!  \begin{description}
+!  \item[array]
+!    Partially created {\tt ESMF\_LocalArray} object.  This entry point is used
+!    during both the C++ and F90 create calls if we need to create an F90
+!    pointer to be used later.
+!  \item[cptr]
+!    Pointer to the C++ memory allocation.
+!  \item[totalCount]
+!    The number of items in each dimension of the array.  This is a 1D
+!    integer array the same length as the rank.
+!  \item[rank]
+!    Array rank.
+!    This must match what is already in the array - it is here only as
+!    a convienience.
+!  \item[typekind]
+!    Array typetypekind.
+!    This must match what is already in the array - it is here only as
+!    a convienience.
+!   \item[totalLBound]
+!    The lower index values per rank.
+!   \item[totalUBound]
+!    The upper index values per rank.
+!   \item[{[rc]}]
+!    Return code; equals {\tt ESMF\_SUCCESS} if there are no errors.
+!   \end{description}
+!
+!EOPI
+!------------------------------------------------------------------------------
+    ! Local vars
+    integer :: localrc                  ! local return code
+    integer :: localtk
+
+    ! Initialize return code; assume routine not implemented
+    localrc = ESMF_RC_NOT_IMPL
+    if (present(rc)) rc = ESMF_RC_NOT_IMPL
+
+    ! Cannot check init status of array argument here because
+    ! the array object is only partially created at this point
+
+    localtk = typekind%dkind
+
+    ! Call a T/K/R specific interface in order to create the proper
+    !  type of F90 pointer, allocate the space, set the values in the
+    !  Local Array object, and return.  (The routine this code is calling is
+    !  generated by macro.)
+
+    !! calling routines generated from macros by the preprocessor
+
+    select case (localtk)
+^ifndef ESMF_NO_INTEGER_1_BYTE
+      case (ESMF_TYPEKIND_I1%dkind)
+        select case (rank)
+          case (1)
+            call ESMF_LocalArrCToF90Ptr1DI1(array, cptr, totalCount, &
+              datacopyflag=ESMF_DATACOPY_REFERENCE, &
+              totalLBound=totalLBound, totalUBound=totalUBound, rc=localrc)
+          case (2)
+            call ESMF_LocalArrCToF90Ptr2DI1(array, cptr, totalCount, &
+              datacopyflag=ESMF_DATACOPY_REFERENCE, &
+              totalLBound=totalLBound, totalUBound=totalUBound, rc=localrc)
+          case (3)
+            call ESMF_LocalArrCToF90Ptr3DI1(array, cptr, totalCount, &
+              datacopyflag=ESMF_DATACOPY_REFERENCE, &
+              totalLBound=totalLBound, totalUBound=totalUBound, rc=localrc)
+          case (4)
+            call ESMF_LocalArrCToF90Ptr4DI1(array, cptr, totalCount, &
+              datacopyflag=ESMF_DATACOPY_REFERENCE, &
+              totalLBound=totalLBound, totalUBound=totalUBound, rc=localrc)
+^ifndef ESMF_NO_GREATER_THAN_4D
+          case (5)
+            call ESMF_LocalArrCToF90Ptr5DI1(array, cptr, totalCount, &
+              datacopyflag=ESMF_DATACOPY_REFERENCE, &
+              totalLBound=totalLBound, totalUBound=totalUBound, rc=localrc)
+          case (6)
+            call ESMF_LocalArrCToF90Ptr6DI1(array, cptr, totalCount, &
+              datacopyflag=ESMF_DATACOPY_REFERENCE, &
+              totalLBound=totalLBound, totalUBound=totalUBound, rc=localrc)
+          case (7)
+            call ESMF_LocalArrCToF90Ptr7DI1(array, cptr, totalCount, &
+              datacopyflag=ESMF_DATACOPY_REFERENCE, &
+              totalLBound=totalLBound, totalUBound=totalUBound, rc=localrc)
+^endif
+          case default
+            if (ESMF_LogFoundError(ESMF_RC_ARG_BAD, &
+              msg="Unsupported rank", &
+              ESMF_CONTEXT, rcToReturn=rc)) return
+        end select
+^endif
+^ifndef ESMF_NO_INTEGER_2_BYTE
+      case (ESMF_TYPEKIND_I2%dkind)
+        select case(rank)
+          case (1)
+            call ESMF_LocalArrCToF90Ptr1DI2(array, cptr, totalCount, &
+              datacopyflag=ESMF_DATACOPY_REFERENCE, &
+              totalLBound=totalLBound, totalUBound=totalUBound, rc=localrc)
+          case (2)
+            call ESMF_LocalArrCToF90Ptr2DI2(array, cptr, totalCount, &
+              datacopyflag=ESMF_DATACOPY_REFERENCE, &
+              totalLBound=totalLBound, totalUBound=totalUBound, rc=localrc)
+          case (3)
+            call ESMF_LocalArrCToF90Ptr3DI2(array, cptr, totalCount, &
+              datacopyflag=ESMF_DATACOPY_REFERENCE, &
+              totalLBound=totalLBound, totalUBound=totalUBound, rc=localrc)
+          case (4)
+            call ESMF_LocalArrCToF90Ptr4DI2(array, cptr, totalCount, &
+              datacopyflag=ESMF_DATACOPY_REFERENCE, &
+              totalLBound=totalLBound, totalUBound=totalUBound, rc=localrc)
+^ifndef ESMF_NO_GREATER_THAN_4D
+          case (5)
+            call ESMF_LocalArrCToF90Ptr5DI2(array, cptr, totalCount, &
+              datacopyflag=ESMF_DATACOPY_REFERENCE, &
+              totalLBound=totalLBound, totalUBound=totalUBound, rc=localrc)
+          case (6)
+            call ESMF_LocalArrCToF90Ptr6DI2(array, cptr, totalCount, &
+              datacopyflag=ESMF_DATACOPY_REFERENCE, &
+              totalLBound=totalLBound, totalUBound=totalUBound, rc=localrc)
+          case (7)
+            call ESMF_LocalArrCToF90Ptr7DI2(array, cptr, totalCount, &
+              datacopyflag=ESMF_DATACOPY_REFERENCE, &
+              totalLBound=totalLBound, totalUBound=totalUBound, rc=localrc)
+^endif
+          case default
+            if (ESMF_LogFoundError(ESMF_RC_ARG_BAD, &
+              msg="Unsupported rank", &
+              ESMF_CONTEXT, rcToReturn=rc)) return
+        end select
+^endif
+      case (ESMF_TYPEKIND_I4%dkind)
+        select case(rank)
+          case (1)
+            call ESMF_LocalArrCToF90Ptr1DI4(array, cptr, totalCount, &
+              datacopyflag=ESMF_DATACOPY_REFERENCE, &
+              totalLBound=totalLBound, totalUBound=totalUBound, rc=localrc)
+          case (2)
+            call ESMF_LocalArrCToF90Ptr2DI4(array, cptr, totalCount, &
+              datacopyflag=ESMF_DATACOPY_REFERENCE, &
+              totalLBound=totalLBound, totalUBound=totalUBound, rc=localrc)
+          case (3)
+            call ESMF_LocalArrCToF90Ptr3DI4(array, cptr, totalCount, &
+              datacopyflag=ESMF_DATACOPY_REFERENCE, &
+              totalLBound=totalLBound, totalUBound=totalUBound, rc=localrc)
+          case (4)
+            call ESMF_LocalArrCToF90Ptr4DI4(array, cptr, totalCount, &
+              datacopyflag=ESMF_DATACOPY_REFERENCE, &
+              totalLBound=totalLBound, totalUBound=totalUBound, rc=localrc)
+^ifndef ESMF_NO_GREATER_THAN_4D
+          case (5)
+            call ESMF_LocalArrCToF90Ptr5DI4(array, cptr, totalCount, &
+              datacopyflag=ESMF_DATACOPY_REFERENCE, &
+              totalLBound=totalLBound, totalUBound=totalUBound, rc=localrc)
+          case (6)
+            call ESMF_LocalArrCToF90Ptr6DI4(array, cptr, totalCount, &
+              datacopyflag=ESMF_DATACOPY_REFERENCE, &
+              totalLBound=totalLBound, totalUBound=totalUBound, rc=localrc)
+          case (7)
+            call ESMF_LocalArrCToF90Ptr7DI4(array, cptr, totalCount, &
+              datacopyflag=ESMF_DATACOPY_REFERENCE, &
+              totalLBound=totalLBound, totalUBound=totalUBound, rc=localrc)
+^endif
+          case default
+            if (ESMF_LogFoundError(ESMF_RC_ARG_BAD, &
+              msg="Unsupported rank", &
+              ESMF_CONTEXT, rcToReturn=rc)) return
+        end select
+      case (ESMF_TYPEKIND_I8%dkind)
+        select case(rank)
+          case (1)
+            call ESMF_LocalArrCToF90Ptr1DI8(array, cptr, totalCount, &
+              datacopyflag=ESMF_DATACOPY_REFERENCE, &
+              totalLBound=totalLBound, totalUBound=totalUBound, rc=localrc)
+          case (2)
+            call ESMF_LocalArrCToF90Ptr2DI8(array, cptr, totalCount, &
+              datacopyflag=ESMF_DATACOPY_REFERENCE, &
+              totalLBound=totalLBound, totalUBound=totalUBound, rc=localrc)
+          case (3)
+            call ESMF_LocalArrCToF90Ptr3DI8(array, cptr, totalCount, &
+              datacopyflag=ESMF_DATACOPY_REFERENCE, &
+              totalLBound=totalLBound, totalUBound=totalUBound, rc=localrc)
+          case (4)
+            call ESMF_LocalArrCToF90Ptr4DI8(array, cptr, totalCount, &
+              datacopyflag=ESMF_DATACOPY_REFERENCE, &
+              totalLBound=totalLBound, totalUBound=totalUBound, rc=localrc)
+^ifndef ESMF_NO_GREATER_THAN_4D
+          case (5)
+            call ESMF_LocalArrCToF90Ptr5DI8(array, cptr, totalCount, &
+              datacopyflag=ESMF_DATACOPY_REFERENCE, &
+              totalLBound=totalLBound, totalUBound=totalUBound, rc=localrc)
+          case (6)
+            call ESMF_LocalArrCToF90Ptr6DI8(array, cptr, totalCount, &
+              datacopyflag=ESMF_DATACOPY_REFERENCE, &
+              totalLBound=totalLBound, totalUBound=totalUBound, rc=localrc)
+          case (7)
+            call ESMF_LocalArrCToF90Ptr7DI8(array, cptr, totalCount, &
+              datacopyflag=ESMF_DATACOPY_REFERENCE, &
+              totalLBound=totalLBound, totalUBound=totalUBound, rc=localrc)
+^endif
+          case default
+            if (ESMF_LogFoundError(ESMF_RC_ARG_BAD, &
+              msg="Unsupported rank", &
+              ESMF_CONTEXT, rcToReturn=rc)) return
+        end select
+      case (ESMF_TYPEKIND_R4%dkind)
+        select case(rank)
+          case (1)
+            call ESMF_LocalArrCToF90Ptr1DR4(array, cptr, totalCount, &
+              datacopyflag=ESMF_DATACOPY_REFERENCE, &
+              totalLBound=totalLBound, totalUBound=totalUBound, rc=localrc)
+          case (2)
+            call ESMF_LocalArrCToF90Ptr2DR4(array, cptr, totalCount, &
+              datacopyflag=ESMF_DATACOPY_REFERENCE, &
+              totalLBound=totalLBound, totalUBound=totalUBound, rc=localrc)
+          case (3)
+            call ESMF_LocalArrCToF90Ptr3DR4(array, cptr, totalCount, &
+              datacopyflag=ESMF_DATACOPY_REFERENCE, &
+              totalLBound=totalLBound, totalUBound=totalUBound, rc=localrc)
+          case (4)
+            call ESMF_LocalArrCToF90Ptr4DR4(array, cptr, totalCount, &
+              datacopyflag=ESMF_DATACOPY_REFERENCE, &
+              totalLBound=totalLBound, totalUBound=totalUBound, rc=localrc)
+^ifndef ESMF_NO_GREATER_THAN_4D
+          case (5)
+            call ESMF_LocalArrCToF90Ptr5DR4(array, cptr, totalCount, &
+              datacopyflag=ESMF_DATACOPY_REFERENCE, &
+              totalLBound=totalLBound, totalUBound=totalUBound, rc=localrc)
+          case (6)
+            call ESMF_LocalArrCToF90Ptr6DR4(array, cptr, totalCount, &
+              datacopyflag=ESMF_DATACOPY_REFERENCE, &
+              totalLBound=totalLBound, totalUBound=totalUBound, rc=localrc)
+          case (7)
+            call ESMF_LocalArrCToF90Ptr7DR4(array, cptr, totalCount, &
+              datacopyflag=ESMF_DATACOPY_REFERENCE, &
+              totalLBound=totalLBound, totalUBound=totalUBound, rc=localrc)
+^endif
+          case default
+            if (ESMF_LogFoundError(ESMF_RC_ARG_BAD, &
+              msg="Unsupported rank", &
+              ESMF_CONTEXT, rcToReturn=rc)) return
+        end select
+      case (ESMF_TYPEKIND_R8%dkind)
+        select case(rank)
+          case (1)
+            call ESMF_LocalArrCToF90Ptr1DR8(array, cptr, totalCount, &
+              datacopyflag=ESMF_DATACOPY_REFERENCE, &
+              totalLBound=totalLBound, totalUBound=totalUBound, rc=localrc)
+          case (2)
+            call ESMF_LocalArrCToF90Ptr2DR8(array, cptr, totalCount, &
+              datacopyflag=ESMF_DATACOPY_REFERENCE, &
+              totalLBound=totalLBound, totalUBound=totalUBound, rc=localrc)
+          case (3)
+            call ESMF_LocalArrCToF90Ptr3DR8(array, cptr, totalCount, &
+              datacopyflag=ESMF_DATACOPY_REFERENCE, &
+              totalLBound=totalLBound, totalUBound=totalUBound, rc=localrc)
+          case (4)
+            call ESMF_LocalArrCToF90Ptr4DR8(array, cptr, totalCount, &
+              datacopyflag=ESMF_DATACOPY_REFERENCE, &
+              totalLBound=totalLBound, totalUBound=totalUBound, rc=localrc)
+^ifndef ESMF_NO_GREATER_THAN_4D
+          case (5)
+            call ESMF_LocalArrCToF90Ptr5DR8(array, cptr, totalCount, &
+              datacopyflag=ESMF_DATACOPY_REFERENCE, &
+              totalLBound=totalLBound, totalUBound=totalUBound, rc=localrc)
+          case (6)
+            call ESMF_LocalArrCToF90Ptr6DR8(array, cptr, totalCount, &
+              datacopyflag=ESMF_DATACOPY_REFERENCE, &
+              totalLBound=totalLBound, totalUBound=totalUBound, rc=localrc)
+          case (7)
+            call ESMF_LocalArrCToF90Ptr7DR8(array, cptr, totalCount, &
+              datacopyflag=ESMF_DATACOPY_REFERENCE, &
+              totalLBound=totalLBound, totalUBound=totalUBound, rc=localrc)
+^endif
+          case default
+            if (ESMF_LogFoundError(ESMF_RC_ARG_BAD, &
+              msg="Unsupported rank", &
+              ESMF_CONTEXT, rcToReturn=rc)) return
+        end select
+      case default
+        if (ESMF_LogFoundError(ESMF_RC_ARG_BAD, &
+          msg="Unsupported typekind", &
+          ESMF_CONTEXT, rcToReturn=rc)) return
+    end select
+
+    ! Return successfully
+    if (present(rc)) rc = ESMF_SUCCESS
+
+  end subroutine ESMF_LocalArrCToF90Ptr
+!------------------------------------------------------------------------------
+
+
+#define LocalArrCToF90PtrDoc() \
+!---------------------------------------------------------------------------- @\
+!BOPI @\
+! !IROUTINE: ESMF_LocalArrCToF90Ptr<rank><type><kind> - Create a Fortran Ptr of the proper T/K/R @\
+! @\
+! !INTERFACE: @\
+!      subroutine ESMF_LocalArrCToF90Ptr<rank><type><kind>(array, cptr, totalCount, farrayPtr, datacopyflag, totalLBound, totalUBound, rc) @\
+! @\
+! !ARGUMENTS: @\
+!      type(ESMF_LocalArray), intent(inout) :: array @\
+!      type(C_PTR),           intent(in)    :: cptr @\
+!      integer, dimension(:), intent(in) :: totalCount @\
+!      type(ESMF_DataCopy_Flag), intent(in), optional :: datacopyflag @\
+!      integer, dimension(:), intent(in), optional :: totalLBound @\
+!      integer, dimension(:), intent(in), optional :: totalUBound @\
+!      integer, intent(out), optional :: rc   @\
+! @\
+! !DESCRIPTION: @\
+!  Creates a Fortran Pointer of the requested T/K/R.  After creating the @\
+!  pointer and doing the allocation based on totalCount, also goes ahead and @\
+!  calls into the C++ interfaces to set values on the {\tt ESMF\_LocalArray} @\
+!  object. (This is to save on the total number of nested crossings of the @\
+!  F90/C++ boundary.) @\
+! Valid type/kind/rank combinations supported by the @\
+! framework are: ranks 1 to 7, type real of kind *4 or *8, @\
+! and type integer of kind *1, *2, *4, or *8. @\
+! @\
+!  Optional args are an existing Fortran pointer which if given is used @\
+!  instead of a new one, and a datacopyflag flag which if set to copy will @\
+!  do a contents copy or reference. @\
+! @\
+! The arguments are: @\
+!  \begin{description} @\
+!  \item[array] @\
+!   The {\tt ESMF\_LocalArray} to set the values into. @\
+!  \item[cptr] @\
+!   Location of the C++ memory allocation. @\
+!  \item[totalCount] @\
+!   An integer array of totalCount.  Must be the same length as the rank. @\
+!   {\tt datacopyflag} is specified. @\
+!  \item[{[datacopyflag]}] @\
+!   An optional copy flag which can be specified if a Fortran pointer is also @\
+!   given.  Can either make a new copy of the data or ref existing data. @\
+!  \item[{[totalLBound]}] @\
+!  An integer array of lower index values.  Must be same length as the rank. @\
+!  \item[{[totalUBound]}] @\
+! An integer array of upper index values.  Must be same length as the rank. @\
+!  \item[{[rc]}] @\
+!    Return code; equals {\tt ESMF\_SUCCESS} if there are no errors. @\
+!  \end{description} @\
+! @\
+!EOPI @\
+!---------------------------------------------------------------------------- @\
+ @\
+
+#define LocalArrCToF90PtrMacro(mname, mtypekind, mrank, mdim, mlen, mrng, mloc) \
+!---------------------------------------------------------------------------- @\
+^undef  ESMF_METHOD @\
+!define ESMF_METHOD "ESMF_LocalArrCToF90Ptr##mrank##D##mtypekind" @\
+^define ESMF_METHOD "ESMF_LocalArrCToF90Ptr" @\
+ @\
+  subroutine ESMF_LocalArrCToF90Ptr##mrank##D##mtypekind(array, cptr, & @\
+    counts, datacopyflag, totalLBound, totalUBound, rc) @\
+ @\
+    type(ESMF_LocalArray), intent(inout) :: array @\
+    type(C_PTR),           intent(in)    :: cptr @\
+    integer, dimension(:), intent(in) :: counts @\
+    type(ESMF_DataCopy_Flag), intent(in), optional :: datacopyflag @\
+    integer, dimension(:), intent(in), optional :: totalLBound @\
+    integer, dimension(:), intent(in), optional :: totalUBound @\
+    integer, intent(out), optional :: rc   @\
+ @\
+    ! Local variables @\
+    integer :: localrc                  ! local return code @\
+    mname (ESMF_KIND_##mtypekind), dimension(mdim), pointer :: farrayPtr  @\
+    character(len=160) :: msgString @\
+    integer, dimension(mrank) :: totalLBoundLocal @\
+    integer, dimension(mrank) :: totalUBoundLocal @\
+ @\
+    ! Initialize return code; assume routine not implemented @\
+    localrc = ESMF_RC_NOT_IMPL @\
+    if (present(rc)) rc = ESMF_RC_NOT_IMPL @\
+ @\
+    ! Cast C++ pointer to Fortran @\
+    call C_F_POINTER(cptr, farrayPtr, [mlen]) @\
+ @\
+    ! Make a local copy of bounds, because the incoming reference may be @\
+    ! of the C++ LocalArray object itself, and therefore will be reset @\
+    ! by ESMF_LocalArrConstrF90Ptr() below, but actual bounds are needed @\
+    ! further down to adjust the Fortran pointer bounds correctly. @\
+    if (present(totalLBound) .and. present(totalUBound)) then @\
+      totalLBoundLocal(1:mrank) = totalLBound(1:mrank) @\
+      totalUBoundLocal(1:mrank) = totalUBound(1:mrank) @\
+    endif @\
+ @\
+    ! Call into the create method using farrayPtr @\
+    call ESMF_LocalArrConstrF90Ptr##mrank##D##mtypekind(array, counts, & @\
+      farrayPtr, datacopyflag, rc=localrc) @\
+    if (ESMF_LogFoundError(localrc, & @\
+      ESMF_ERR_PASSTHRU, & @\
+      ESMF_CONTEXT, rcToReturn=rc)) return @\
+ @\
+    if (present(totalLBound) .and. present(totalUBound)) then @\
+      ! Adjust the bounds of the Fortran pointer stored in the LocalArray @\
+      call ESMF_LocalArrayAdjust(array, counts, ESMF_TYPEKIND_##mtypekind, & @\
+        mrank, totalLBoundLocal, totalUBoundLocal, rc=localrc) @\
+      if (ESMF_LogFoundError(localrc, & @\
+        ESMF_ERR_PASSTHRU, & @\
+        ESMF_CONTEXT, rcToReturn=rc)) return @\
+    endif @\
+ @\
+    ! Return successfully @\
+    if (present(rc)) rc = ESMF_SUCCESS @\
+ @\
+  end subroutine ESMF_LocalArrCToF90Ptr##mrank##D##mtypekind  @\
+ @\
+!---------------------------------------------------------------------------- @\
+
+TypeKindRankDeclarationMacro(LocalArrCToF90Ptr)
+
+
+
+
+!------------------------------------------------------------------------------
+#define LocalArrayVarMacro(mname, mtypekind, mrank, mdim) \
+  type(ESMF_LAWrap##mrank##D##mtypekind) :: l##mrank##D##mtypekind
+
+#define AllocDeallocateMacro(mname, mtypekind, mrank, mdim, mlen, mrng, mloc) \
+  call c_ESMC_LocalArrayGetFPtr(array, l##mrank##D##mtypekind, localrc) @\
+  if (ESMF_LogFoundError(localrc, & @\
+    ESMF_ERR_PASSTHRU, & @\
+    ESMF_CONTEXT, rcToReturn=rc)) return @\
+ @\
+  deallocate(l##mrank##D##mtypekind%ptr##mrank##D##mtypekind, stat=localrc)  @\
+  if (ESMF_LogFoundDeallocError(localrc, msg="LocalArray deallocation", & @\
+    ESMF_CONTEXT, rcToReturn=rc)) return @\
+ @\
+  nullify(l##mrank##D##mtypekind%ptr##mrank##D##mtypekind) @\
+ @\
+
+!------------------------------------------------------------------------------
+^undef  ESMF_METHOD
+^define ESMF_METHOD "ESMF_LocalArrayF90Deallocate"
+!BOPI
+! !IROUTINE:  ESMF_LocalArrayF90Deallocate - Deallocate an F90 pointer
+!
+! !INTERFACE:
+  subroutine ESMF_LocalArrayF90Deallocate(array, typekind, rank, rc)
+!
+! !ARGUMENTS:
+    type(ESMF_LocalArray), intent(inout) :: array
+    type(ESMF_TypeKind_Flag) :: typekind
+    integer :: rank
+    integer, intent(out), optional :: rc
+!
+! !DESCRIPTION:
+!     Deallocate data contents for an {\tt ESMF\_LocalArray} created from
+!     the C++ interface.  The arguments are:
+!     \begin{description}
+!     \item[array]
+!          A partially created {\tt ESMF\_LocalArray} object.
+!     \item[typekind]
+!          The {\tt ESMF\_LocalArray} kind (short/2, long/8, etc).
+!     \item[rank]
+!          The {\tt ESMF\_LocalArray} rank.
+!     \item[{[rc]}]
+!          Return code; equals {\tt ESMF\_SUCCESS} if there are no errors.
+!   \end{description}
+!
+!EOPI
+!------------------------------------------------------------------------------
+    integer :: localrc                               ! local return code
+    integer :: localtk
+
+    !! local variables, expanded by macro
+AllTypesMacro(LocalArrayVar)
+
+    if (present(rc)) rc = ESMF_RC_NOT_IMPL
+    localrc = ESMF_RC_NOT_IMPL
+
+    localtk = typekind
+
+    !! calling routines generated from macros by the preprocessor
+
+        select case (localtk)
+^ifndef ESMF_NO_INTEGER_1_BYTE
+          case (ESMF_TYPEKIND_I1%dkind)
+            select case (rank)
+              case (1)
+AllocDeallocateMacro(integer, I1, 1, COL1, LEN1, RNG1, LOC1)
+              case (2)
+AllocDeallocateMacro(integer, I1, 2, COL2, LEN2, RNG2, LOC2)
+              case (3)
+AllocDeallocateMacro(integer, I1, 3, COL3, LEN3, RNG3, LOC3)
+              case (4)
+AllocDeallocateMacro(integer, I1, 4, COL4, LEN4, RNG4, LOC4)
+^ifndef ESMF_NO_GREATER_THAN_4D
+              case (5)
+AllocDeallocateMacro(integer, I1, 5, COL5, LEN5, RNG5, LOC5)
+              case (6)
+AllocDeallocateMacro(integer, I1, 6, COL6, LEN6, RNG6, LOC6)
+              case (7)
+AllocDeallocateMacro(integer, I1, 7, COL7, LEN7, RNG7, LOC7)
+^endif
+              case default
+                if (ESMF_LogFoundError(ESMF_RC_ARG_BAD, &
+                  msg="Unsupported rank", &
+                  ESMF_CONTEXT, rcToReturn=rc)) return
+            end select
+^endif
+^ifndef ESMF_NO_INTEGER_2_BYTE
+          case (ESMF_TYPEKIND_I2%dkind)
+            select case(rank)
+              case (1)
+AllocDeallocateMacro(integer, I2, 1, COL1, LEN1, RNG1, LOC1)
+              case (2)
+AllocDeallocateMacro(integer, I2, 2, COL2, LEN2, RNG2, LOC2)
+              case (3)
+AllocDeallocateMacro(integer, I2, 3, COL3, LEN3, RNG3, LOC3)
+              case (4)
+AllocDeallocateMacro(integer, I2, 4, COL4, LEN4, RNG4, LOC4)
+^ifndef ESMF_NO_GREATER_THAN_4D
+              case (5)
+AllocDeallocateMacro(integer, I2, 5, COL5, LEN5, RNG5, LOC5)
+              case (6)
+AllocDeallocateMacro(integer, I2, 6, COL6, LEN6, RNG6, LOC6)
+              case (7)
+AllocDeallocateMacro(integer, I2, 7, COL7, LEN7, RNG7, LOC7)
+
+^endif
+              case default
+               if (ESMF_LogFoundError(ESMF_RC_ARG_BAD, &
+                 msg="Unsupported rank", &
+                 ESMF_CONTEXT, rcToReturn=rc)) return
+            end select
+^endif
+          case (ESMF_TYPEKIND_I4%dkind)
+            select case(rank)
+              case (1)
+AllocDeallocateMacro(integer, I4, 1, COL1, LEN1, RNG1, LOC1)
+              case (2)
+AllocDeallocateMacro(integer, I4, 2, COL2, LEN2, RNG2, LOC2)
+              case (3)
+AllocDeallocateMacro(integer, I4, 3, COL3, LEN3, RNG3, LOC3)
+              case (4)
+AllocDeallocateMacro(integer, I4, 4, COL4, LEN4, RNG4, LOC4)
+^ifndef ESMF_NO_GREATER_THAN_4D
+              case (5)
+AllocDeallocateMacro(integer, I4, 5, COL5, LEN5, RNG5, LOC5)
+              case (6)
+AllocDeallocateMacro(integer, I4, 6, COL6, LEN6, RNG6, LOC6)
+              case (7)
+AllocDeallocateMacro(integer, I4, 7, COL7, LEN7, RNG7, LOC7)
+^endif
+              case default
+                if (ESMF_LogFoundError(ESMF_RC_ARG_BAD, &
+                  msg="Unsupported rank", &
+                  ESMF_CONTEXT, rcToReturn=rc)) return
+            end select
+          case (ESMF_TYPEKIND_I8%dkind)
+            select case(rank)
+              case (1)
+AllocDeallocateMacro(integer, I8, 1, COL1, LEN1, RNG1, LOC1)
+              case (2)
+AllocDeallocateMacro(integer, I8, 2, COL2, LEN2, RNG2, LOC2)
+              case (3)
+AllocDeallocateMacro(integer, I8, 3, COL3, LEN3, RNG3, LOC3)
+              case (4)
+AllocDeallocateMacro(integer, I8, 4, COL4, LEN4, RNG4, LOC4)
+^ifndef ESMF_NO_GREATER_THAN_4D
+              case (5)
+AllocDeallocateMacro(integer, I8, 5, COL5, LEN5, RNG5, LOC5)
+              case (6)
+AllocDeallocateMacro(integer, I8, 6, COL6, LEN6, RNG6, LOC6)
+              case (7)
+AllocDeallocateMacro(integer, I8, 7, COL7, LEN7, RNG7, LOC7)
+^endif
+              case default
+                if (ESMF_LogFoundError(ESMF_RC_ARG_BAD, &
+                  msg="Unsupported rank", &
+                  ESMF_CONTEXT, rcToReturn=rc)) return
+            end select
+          case (ESMF_TYPEKIND_R4%dkind)
+            select case(rank)
+              case (1)
+AllocDeallocateMacro(real, R4, 1, COL1, LEN1, RNG1, LOC1)
+              case (2)
+AllocDeallocateMacro(real, R4, 2, COL2, LEN2, RNG2, LOC2)
+              case (3)
+AllocDeallocateMacro(real, R4, 3, COL3, LEN3, RNG3, LOC3)
+              case (4)
+AllocDeallocateMacro(real, R4, 4, COL4, LEN4, RNG4, LOC4)
+^ifndef ESMF_NO_GREATER_THAN_4D
+              case (5)
+AllocDeallocateMacro(real, R4, 5, COL5, LEN5, RNG5, LOC5)
+              case (6)
+AllocDeallocateMacro(real, R4, 6, COL6, LEN6, RNG6, LOC6)
+              case (7)
+AllocDeallocateMacro(real, R4, 7, COL7, LEN7, RNG7, LOC7)
+^endif
+              case default
+                if (ESMF_LogFoundError(ESMF_RC_ARG_BAD, &
+                  msg="Unsupported rank", &
+                  ESMF_CONTEXT, rcToReturn=rc)) return
+            end select
+          case (ESMF_TYPEKIND_R8%dkind)
+            select case(rank)
+              case (1)
+AllocDeallocateMacro(real, R8, 1, COL1, LEN1, RNG1, LOC1)
+              case (2)
+AllocDeallocateMacro(real, R8, 2, COL2, LEN2, RNG2, LOC2)
+              case (3)
+AllocDeallocateMacro(real, R8, 3, COL3, LEN3, RNG3, LOC3)
+              case (4)
+AllocDeallocateMacro(real, R8, 4, COL4, LEN4, RNG4, LOC4)
+^ifndef ESMF_NO_GREATER_THAN_4D
+              case (5)
+AllocDeallocateMacro(real, R8, 5, COL5, LEN5, RNG5, LOC5)
+              case (6)
+AllocDeallocateMacro(real, R8, 6, COL6, LEN6, RNG6, LOC6)
+              case (7)
+AllocDeallocateMacro(real, R8, 7, COL7, LEN7, RNG7, LOC7)
+^endif
+              case default
+                if (ESMF_LogFoundError(ESMF_RC_ARG_BAD, &
+                  msg="Unsupported rank", &
+                  ESMF_CONTEXT, rcToReturn=rc)) return
+            end select
+          case default
+            if (ESMF_LogFoundError(ESMF_RC_ARG_BAD, &
+              msg="Unsupported kind", &
+              ESMF_CONTEXT, rcToReturn=rc)) return
+        end select
+
+
+    if (ESMF_LogFoundError(localrc, &
+      ESMF_ERR_PASSTHRU, &
+      ESMF_CONTEXT, rcToReturn=rc)) return
+
+    ! return successfully
+    if (present(rc)) rc = ESMF_SUCCESS
+
+  end subroutine ESMF_LocalArrayF90Deallocate
+!------------------------------------------------------------------------------
+
+
+!------------------------------------------------------------------------------
+^undef  ESMF_METHOD
+^define ESMF_METHOD "ESMF_LocalArrayCopyF90Ptr"
+!BOPI
+! !IROUTINE: ESMF_LocalArrayCopyF90Ptr - Copy F90 pointer
+
+! !INTERFACE:
+  subroutine ESMF_LocalArrayCopyF90Ptr(localarrayIn, localarrayOut, rc)
+!
+! !ARGUMENTS:
+    type(ESMF_LocalArray), intent(inout) :: localarrayIn
+    type(ESMF_LocalArray), intent(inout) :: localarrayOut
+    integer, intent(out), optional :: rc
+!
+! !DESCRIPTION:
+!  Copy F90 pointer contents from {\tt arrayIn} to (\tt arrayOut}.
+!
+!  The arguments are:
+!  \begin{description}
+!  \item[arrayIn]
+!    Existing {\tt ESMF\_LocalArray} object.
+!  \item[arrayOut]
+!    Existing {\tt ESMF\_LocalArray} object without alloc for data
+!   \item[{[rc]}]
+!    Return code; equals {\tt ESMF\_SUCCESS} if there are no errors.
+!   \end{description}
+!
+!EOPI
+!------------------------------------------------------------------------------
+    ! Local vars
+    integer :: localrc                   ! local return code
+    integer :: localtk
+    integer :: rank
+
+    type(ESMF_TypeKind_Flag)             :: typekind
+
+    ! Initialize return code; assume routine not implemented
+    localrc = ESMF_RC_NOT_IMPL
+    if (present(rc)) rc = ESMF_RC_NOT_IMPL
+
+    ! Check init status of arguments
+    ESMF_INIT_CHECK_DEEP_SHORT(ESMF_LocalArrayGetInit, localarrayIn, rc)
+
+    ! Identify localarrayIn TKR
+    call c_ESMC_LocalArrayGetRank(localarrayIn, rank, localrc)
+    if (ESMF_LogFoundError(localrc, &
+      ESMF_ERR_PASSTHRU, &
+      ESMF_CONTEXT, rcToReturn=rc)) return
+    call c_ESMC_LocalArrayGetTypeKind(localarrayIn, typekind, localrc)
+    if (ESMF_LogFoundError(localrc, &
+      ESMF_ERR_PASSTHRU, &
+      ESMF_CONTEXT, rcToReturn=rc)) return
+
+    !TODO: check TKR consistency against localarrayOut
+
+    ! Call a T/K/R specific interface in order to create the proper
+    !  type of F90 pointer, allocate the space, set the values in the
+    !  LocalArray object, and return.  (The routine this code is calling is
+    !  generated by macro.)
+
+    localtk = typekind%dkind
+
+    !! calling routines generated from macros by the preprocessor
+
+    select case (localtk)
+^ifndef ESMF_NO_INTEGER_1_BYTE
+      case (ESMF_TYPEKIND_I1%dkind)
+        select case (rank)
+          case (1)
+            call ESMF_LocalArrayCopy1DI1(localarrayIn, localarrayOut, rc=localrc)
+          case (2)
+            call ESMF_LocalArrayCopy2DI1(localarrayIn, localarrayOut, rc=localrc)
+          case (3)
+            call ESMF_LocalArrayCopy3DI1(localarrayIn, localarrayOut, rc=localrc)
+          case (4)
+            call ESMF_LocalArrayCopy4DI1(localarrayIn, localarrayOut, rc=localrc)
+^ifndef ESMF_NO_GREATER_THAN_4D
+          case (5)
+            call ESMF_LocalArrayCopy5DI1(localarrayIn, localarrayOut, rc=localrc)
+          case (6)
+            call ESMF_LocalArrayCopy6DI1(localarrayIn, localarrayOut, rc=localrc)
+          case (7)
+            call ESMF_LocalArrayCopy7DI1(localarrayIn, localarrayOut, rc=localrc)
+^endif
+          case default
+            if (ESMF_LogFoundError(ESMF_RC_ARG_BAD, &
+              msg="Unsupported rank", &
+              ESMF_CONTEXT, rcToReturn=rc)) return
+        end select
+^endif
+^ifndef ESMF_NO_INTEGER_2_BYTE
+      case (ESMF_TYPEKIND_I2%dkind)
+        select case(rank)
+          case (1)
+            call ESMF_LocalArrayCopy1DI2(localarrayIn, localarrayOut, rc=localrc)
+          case (2)
+            call ESMF_LocalArrayCopy2DI2(localarrayIn, localarrayOut, rc=localrc)
+          case (3)
+            call ESMF_LocalArrayCopy3DI2(localarrayIn, localarrayOut, rc=localrc)
+          case (4)
+            call ESMF_LocalArrayCopy4DI2(localarrayIn, localarrayOut, rc=localrc)
+^ifndef ESMF_NO_GREATER_THAN_4D
+          case (5)
+            call ESMF_LocalArrayCopy5DI2(localarrayIn, localarrayOut, rc=localrc)
+          case (6)
+            call ESMF_LocalArrayCopy6DI2(localarrayIn, localarrayOut, rc=localrc)
+          case (7)
+            call ESMF_LocalArrayCopy7DI2(localarrayIn, localarrayOut, rc=localrc)
+^endif
+           case default
+            if (ESMF_LogFoundError(ESMF_RC_ARG_BAD, &
+              msg="Unsupported rank", &
+              ESMF_CONTEXT, rcToReturn=rc)) return
+        end select
+^endif
+      case (ESMF_TYPEKIND_I4%dkind)
+        select case(rank)
+          case (1)
+            call ESMF_LocalArrayCopy1DI4(localarrayIn, localarrayOut, rc=localrc)
+          case (2)
+            call ESMF_LocalArrayCopy2DI4(localarrayIn, localarrayOut, rc=localrc)
+          case (3)
+            call ESMF_LocalArrayCopy3DI4(localarrayIn, localarrayOut, rc=localrc)
+          case (4)
+            call ESMF_LocalArrayCopy4DI4(localarrayIn, localarrayOut, rc=localrc)
+^ifndef ESMF_NO_GREATER_THAN_4D
+          case (5)
+            call ESMF_LocalArrayCopy5DI4(localarrayIn, localarrayOut, rc=localrc)
+          case (6)
+            call ESMF_LocalArrayCopy6DI4(localarrayIn, localarrayOut, rc=localrc)
+          case (7)
+            call ESMF_LocalArrayCopy7DI4(localarrayIn, localarrayOut, rc=localrc)
+^endif
+          case default
+            if (ESMF_LogFoundError(ESMF_RC_ARG_BAD, &
+              msg="Unsupported rank", &
+              ESMF_CONTEXT, rcToReturn=rc)) return
+        end select
+      case (ESMF_TYPEKIND_I8%dkind)
+        select case(rank)
+          case (1)
+            call ESMF_LocalArrayCopy1DI8(localarrayIn, localarrayOut, rc=localrc)
+          case (2)
+            call ESMF_LocalArrayCopy2DI8(localarrayIn, localarrayOut, rc=localrc)
+          case (3)
+            call ESMF_LocalArrayCopy3DI8(localarrayIn, localarrayOut, rc=localrc)
+          case (4)
+            call ESMF_LocalArrayCopy4DI8(localarrayIn, localarrayOut, rc=localrc)
+^ifndef ESMF_NO_GREATER_THAN_4D
+          case (5)
+            call ESMF_LocalArrayCopy5DI8(localarrayIn, localarrayOut, rc=localrc)
+          case (6)
+            call ESMF_LocalArrayCopy6DI8(localarrayIn, localarrayOut, rc=localrc)
+          case (7)
+            call ESMF_LocalArrayCopy7DI8(localarrayIn, localarrayOut, rc=localrc)
+^endif
+          case default
+            if (ESMF_LogFoundError(ESMF_RC_ARG_BAD, &
+              msg="Unsupported rank", &
+              ESMF_CONTEXT, rcToReturn=rc)) return
+        end select
+      case (ESMF_TYPEKIND_R4%dkind)
+        select case(rank)
+          case (1)
+            call ESMF_LocalArrayCopy1DR4(localarrayIn, localarrayOut, rc=localrc)
+          case (2)
+            call ESMF_LocalArrayCopy2DR4(localarrayIn, localarrayOut, rc=localrc)
+          case (3)
+            call ESMF_LocalArrayCopy3DR4(localarrayIn, localarrayOut, rc=localrc)
+          case (4)
+            call ESMF_LocalArrayCopy4DR4(localarrayIn, localarrayOut, rc=localrc)
+^ifndef ESMF_NO_GREATER_THAN_4D
+          case (5)
+            call ESMF_LocalArrayCopy5DR4(localarrayIn, localarrayOut, rc=localrc)
+          case (6)
+            call ESMF_LocalArrayCopy6DR4(localarrayIn, localarrayOut, rc=localrc)
+          case (7)
+            call ESMF_LocalArrayCopy7DR4(localarrayIn, localarrayOut, rc=localrc)
+^endif
+          case default
+            if (ESMF_LogFoundError(ESMF_RC_ARG_BAD, &
+              msg="Unsupported rank", &
+              ESMF_CONTEXT, rcToReturn=rc)) return
+        end select
+      case (ESMF_TYPEKIND_R8%dkind)
+        select case(rank)
+          case (1)
+            call ESMF_LocalArrayCopy1DR8(localarrayIn, localarrayOut, rc=localrc)
+          case (2)
+            call ESMF_LocalArrayCopy2DR8(localarrayIn, localarrayOut, rc=localrc)
+          case (3)
+            call ESMF_LocalArrayCopy3DR8(localarrayIn, localarrayOut, rc=localrc)
+          case (4)
+            call ESMF_LocalArrayCopy4DR8(localarrayIn, localarrayOut, rc=localrc)
+^ifndef ESMF_NO_GREATER_THAN_4D
+          case (5)
+            call ESMF_LocalArrayCopy5DR8(localarrayIn, localarrayOut, rc=localrc)
+          case (6)
+            call ESMF_LocalArrayCopy6DR8(localarrayIn, localarrayOut, rc=localrc)
+          case (7)
+            call ESMF_LocalArrayCopy7DR8(localarrayIn, localarrayOut, rc=localrc)
+^endif
+          case default
+            if (ESMF_LogFoundError(ESMF_RC_ARG_BAD, &
+              msg="Unsupported rank", &
+              ESMF_CONTEXT, rcToReturn=rc)) return
+        end select
+      case default
+        if (ESMF_LogFoundError(ESMF_RC_ARG_BAD, &
+          msg="Unsupported typekind", &
+          ESMF_CONTEXT, rcToReturn=rc)) return
+    end select
+    if (ESMF_LogFoundError(localrc, &
+      ESMF_ERR_PASSTHRU, &
+      ESMF_CONTEXT, rcToReturn=rc)) return
+
+    ! Set init code
+    ESMF_INIT_SET_CREATED(localarrayOut)
+
+    ! Return successfully
+    if (present(rc)) rc = ESMF_SUCCESS
+
+  end subroutine ESMF_LocalArrayCopyF90Ptr
+!------------------------------------------------------------------------------
+
+#define LocalArrayCopyDoc() \
+!---------------------------------------------------------------------------- @\
+!BOPI @\
+! !INTERFACE: @\
+!     subroutine ESMF_LocalArrayCopy<rank><type><kind>(arrayIn, arrayOut, rc) @\
+! @\
+! !ARGUMENTS: @\
+!     type(ESMF_LocalArray), intent(in) :: arrayIn @\
+!     type(ESMF_LocalArray), intent(inout) :: arrayOut @\
+!     type(ESMF_DataCopy_Flag), intent(in), optional :: datacopyflag @\
+!     integer, intent(out), optional :: rc @\
+! @\
+! !DESCRIPTION: @\
+! Return a Fortran pointer to the data buffer, or return a Fortran pointer @\
+! to a new copy of the data. @\
+! Valid type/kind/rank combinations supported by the @\
+! framework are: ranks 1 to 7, type real of kind *4 or *8, @\
+! and type integer of kind *1, *2, *4, or *8. @\
+! @\
+! The arguments are: @\
+!  \begin{description} @\
+!  \item[arrayIn] @\
+!   The {\tt ESMF\_LocalArray} to copy. @\
+!  \item[arrayOut] @\
+!   The copied array. @\
+!  \item[{[datacopyflag]}] @\
+!   An optional copy flag which can be specified. @\
+!   Can either make a new copy of the data or reference existing data. @\
+!  \item[{[rc]}] @\
+!    Return code; equals {\tt ESMF\_SUCCESS} if there are no errors. @\
+!  \end{description} @\
+! @\
+!EOPI @\
+!---------------------------------------------------------------------------- @\
+ @\
+
+#define LocalArrayCopyMacro(mname, mtypekind, mrank, mdim, mlen, mrng, mloc) \
+!---------------------------------------------------------------------------- @\
+^undef  ESMF_METHOD @\
+!define ESMF_METHOD "ESMF_LocalArrayCopy##mrank##D##mtypekind" @\
+^define ESMF_METHOD "ESMF_LocalArrayCopy" @\
+  subroutine ESMF_LocalArrayCopy##mrank##D##mtypekind(arrayIn, arrayOut, rc) @\
+ @\
+    type(ESMF_LocalArray) :: arrayIn @\
+    type(ESMF_LocalArray) :: arrayOut @\
+    integer, intent(out), optional :: rc @\
+ @\
+    integer :: localrc                   ! local return code @\
+ @\
+    type (ESMF_LAWrap##mrank##D##mtypekind) :: wrapIn  ! for passing f90 ptr to C++ @\
+    type (ESMF_LAWrap##mrank##D##mtypekind) :: wrapOut  ! for passing f90 ptr to C++ @\
+ @\
+    integer :: lb(mrank), ub(mrank)  ! size info for the array @\
+    mname (ESMF_KIND_##mtypekind), dimension(mdim), pointer :: lp ! local copy @\
+ @\
+    ! initialize return code; assume routine not implemented @\
+    localrc = ESMF_RC_NOT_IMPL @\
+    if (present(rc)) then @\
+      rc = ESMF_RC_NOT_IMPL @\
+    endif @\
+ @\
+    call c_ESMC_LocalArrayGetFPtr(arrayIn, wrapIn, localrc) @\
+    if (ESMF_LogFoundError(localrc, & @\
+      ESMF_ERR_PASSTHRU, & @\
+      ESMF_CONTEXT, rcToReturn=rc)) return @\
+ @\
+    ! Allocate a new buffer and return a copy @\
+    call c_ESMC_LocalArrayGetLbounds(arrayOut, lb, localrc) @\
+    if (ESMF_LogFoundError(localrc, & @\
+      ESMF_ERR_PASSTHRU, & @\
+      ESMF_CONTEXT, rcToReturn=rc)) return @\
+    call c_ESMC_LocalArrayGetUbounds(arrayOut, ub, localrc) @\
+    if (ESMF_LogFoundError(localrc, & @\
+      ESMF_ERR_PASSTHRU, & @\
+      ESMF_CONTEXT, rcToReturn=rc)) return @\
+    ! Macro mrng @\
+    ! is a macro that has correct construction of lb and ub elements @\
+    allocate(lp(mrng), stat=localrc) @\
+    if (ESMF_LogFoundAllocError(localrc, & @\
+      msg="local data space", & @\
+      ESMF_CONTEXT, rcToReturn=rc)) return @\
+    ! this must do a contents assignment @\
+    lp = wrapIn%ptr##mrank##D##mtypekind @\
+    ! point to this memory allocation in the arrayOut @\
+    wrapOut%ptr##mrank##D##mtypekind => lp  @\
+    call c_ESMC_LocalArraySetFPtr(arrayOut, wrapOut, localrc) @\
+    if (ESMF_LogFoundError(localrc, & @\
+      ESMF_ERR_PASSTHRU, & @\
+      ESMF_CONTEXT, rcToReturn=rc)) return @\
+    if (size(lp) .ne. 0) then @\
+      call c_ESMC_LocalArraySetBaseAddr(arrayOut, & @\
+        ESMF_DATA_ADDRESS(lp(mloc)), localrc) @\
+      if (ESMF_LogFoundError(localrc, & @\
+        ESMF_ERR_PASSTHRU, & @\
+        ESMF_CONTEXT, rcToReturn=rc)) return @\
+    else @\
+      call c_ESMC_LocalArraySetBaseAddr(arrayOut, & @\
+        ESMF_NULL_POINTER, localrc) @\
+      if (ESMF_LogFoundError(localrc, & @\
+        ESMF_ERR_PASSTHRU, & @\
+        ESMF_CONTEXT, rcToReturn=rc)) return @\
+    endif @\
+ @\
+    ! return successfully @\
+    if (present(rc)) rc = ESMF_SUCCESS @\
+ @\
+   end subroutine ESMF_LocalArrayCopy##mrank##D##mtypekind @\
+ @\
+!---------------------------------------------------------------------------- @\
+
+TypeKindRankDeclarationMacro(LocalArrayCopy)
+
+
+!------------------------------------------------------------------------------
+^undef  ESMF_METHOD
+^define ESMF_METHOD "ESMF_LocalArrayAdjust"
+!BOPI
+! !IROUTINE: ESMF_LocalArrayAdjust - Adjust bounds of Fortran array member
+!
+! !INTERFACE:
+  subroutine ESMF_LocalArrayAdjust(array, totalCount, typekind, rank, &
+    totalLBound, totalUBound, rc)
+!
+! !ARGUMENTS:
+   type(ESMF_LocalArray), intent(inout) :: array
+   integer, dimension(:), intent(in) :: totalCount
+   type(ESMF_TypeKind_Flag), intent(in) :: typekind
+   integer, intent(in) :: rank
+   integer, dimension(:), intent(in) :: totalLBound
+   integer, dimension(:), intent(in) :: totalUBound
+   integer, intent(out), optional :: rc
+
+!
+! !DESCRIPTION:
+!   Adjust bounds of Fortran array member in {\tt ESMF\_LocalArray} object.
+!
+!EOPI
+!------------------------------------------------------------------------------
+    ! Local vars
+    integer :: localrc                   ! local return code
+    integer :: localtk, i
+
+    localrc = ESMF_RC_NOT_IMPL
+
+    ! Cannot check init status of array argument here because
+    ! the array object is only partially created at this point
+
+    localtk = typekind%dkind
+
+    ! Sanity check the bounds
+    do i=1, rank
+      if (totalUBound(i) < totalLBound(i)) then
+        call ESMF_LogSetError(rcToCheck=ESMF_RC_ARG_BAD, &
+          msg="Upper bound must not be below lower bound!", &
+          ESMF_CONTEXT, rcToReturn=rc)
+        return
+      endif
+    enddo
+
+    ! Call a T/K/R specific interface
+
+        select case (localtk)
+^ifndef ESMF_NO_INTEGER_1_BYTE
+          case (ESMF_TYPEKIND_I1%dkind)
+            select case (rank)
+              case (1)
+                call ESMF_LocalArrayAdjust1DI1(array, totalCount, &
+                                    lb=totalLBound, ub=totalUBound, rc=localrc)
+              case (2)
+                call ESMF_LocalArrayAdjust2DI1(array, totalCount, &
+                                    lb=totalLBound, ub=totalUBound, rc=localrc)
+              case (3)
+                call ESMF_LocalArrayAdjust3DI1(array, totalCount, &
+                                    lb=totalLBound, ub=totalUBound, rc=localrc)
+              case (4)
+                call ESMF_LocalArrayAdjust4DI1(array, totalCount, &
+                                    lb=totalLBound, ub=totalUBound, rc=localrc)
+^ifndef ESMF_NO_GREATER_THAN_4D
+              case (5)
+                call ESMF_LocalArrayAdjust5DI1(array, totalCount, &
+                                    lb=totalLBound, ub=totalUBound, rc=localrc)
+              case (6)
+                call ESMF_LocalArrayAdjust6DI1(array, totalCount, &
+                                    lb=totalLBound, ub=totalUBound, rc=localrc)
+              case (7)
+                call ESMF_LocalArrayAdjust7DI1(array, totalCount, &
+                                    lb=totalLBound, ub=totalUBound, rc=localrc)
+^endif
+              case default
+                    if (ESMF_LogFoundError(ESMF_RC_ARG_BAD, &
+                                msg="Unsupported rank", &
+                                 ESMF_CONTEXT, rcToReturn=rc)) return
+            end select
+^endif
+^ifndef ESMF_NO_INTEGER_2_BYTE
+          case (ESMF_TYPEKIND_I2%dkind)
+            select case(rank)
+              case (1)
+                call ESMF_LocalArrayAdjust1DI2(array, totalCount, &
+                                    lb=totalLBound, ub=totalUBound, rc=localrc)
+              case (2)
+                call ESMF_LocalArrayAdjust2DI2(array, totalCount, &
+                                    lb=totalLBound, ub=totalUBound, rc=localrc)
+              case (3)
+                call ESMF_LocalArrayAdjust3DI2(array, totalCount, &
+                                    lb=totalLBound, ub=totalUBound, rc=localrc)
+              case (4)
+                call ESMF_LocalArrayAdjust4DI2(array, totalCount, &
+                                    lb=totalLBound, ub=totalUBound, rc=localrc)
+^ifndef ESMF_NO_GREATER_THAN_4D
+              case (5)
+                call ESMF_LocalArrayAdjust5DI2(array, totalCount, &
+                                    lb=totalLBound, ub=totalUBound, rc=localrc)
+              case (6)
+                call ESMF_LocalArrayAdjust6DI2(array, totalCount, &
+                                    lb=totalLBound, ub=totalUBound, rc=localrc)
+              case (7)
+                call ESMF_LocalArrayAdjust7DI2(array, totalCount, &
+                                    lb=totalLBound, ub=totalUBound, rc=localrc)
+^endif
+              case default
+                    if (ESMF_LogFoundError(ESMF_RC_ARG_BAD, &
+                                msg="Unsupported rank", &
+                                 ESMF_CONTEXT, rcToReturn=rc)) return
+            end select
+^endif
+          case (ESMF_TYPEKIND_I4%dkind)
+            select case(rank)
+              case (1)
+                call ESMF_LocalArrayAdjust1DI4(array, totalCount, &
+                                    lb=totalLBound, ub=totalUBound, rc=localrc)
+              case (2)
+                call ESMF_LocalArrayAdjust2DI4(array, totalCount, &
+                                    lb=totalLBound, ub=totalUBound, rc=localrc)
+              case (3)
+                call ESMF_LocalArrayAdjust3DI4(array, totalCount, &
+                                    lb=totalLBound, ub=totalUBound, rc=localrc)
+              case (4)
+                call ESMF_LocalArrayAdjust4DI4(array, totalCount, &
+                                    lb=totalLBound, ub=totalUBound, rc=localrc)
+^ifndef ESMF_NO_GREATER_THAN_4D
+              case (5)
+                call ESMF_LocalArrayAdjust5DI4(array, totalCount, &
+                                    lb=totalLBound, ub=totalUBound, rc=localrc)
+              case (6)
+                call ESMF_LocalArrayAdjust6DI4(array, totalCount, &
+                                    lb=totalLBound, ub=totalUBound, rc=localrc)
+              case (7)
+                call ESMF_LocalArrayAdjust7DI4(array, totalCount, &
+                                    lb=totalLBound, ub=totalUBound, rc=localrc)
+^endif
+              case default
+                    if (ESMF_LogFoundError(ESMF_RC_ARG_BAD, &
+                                msg="Unsupported rank", &
+                                 ESMF_CONTEXT, rcToReturn=rc)) return
+            end select
+          case (ESMF_TYPEKIND_I8%dkind)
+            select case(rank)
+              case (1)
+                call ESMF_LocalArrayAdjust1DI8(array, totalCount, &
+                                    lb=totalLBound, ub=totalUBound, rc=localrc)
+              case (2)
+                call ESMF_LocalArrayAdjust2DI8(array, totalCount, &
+                                    lb=totalLBound, ub=totalUBound, rc=localrc)
+              case (3)
+                call ESMF_LocalArrayAdjust3DI8(array, totalCount, &
+                                    lb=totalLBound, ub=totalUBound, rc=localrc)
+              case (4)
+                call ESMF_LocalArrayAdjust4DI8(array, totalCount, &
+                                    lb=totalLBound, ub=totalUBound, rc=localrc)
+^ifndef ESMF_NO_GREATER_THAN_4D
+              case (5)
+                call ESMF_LocalArrayAdjust5DI8(array, totalCount, &
+                                    lb=totalLBound, ub=totalUBound, rc=localrc)
+              case (6)
+                call ESMF_LocalArrayAdjust6DI8(array, totalCount, &
+                                    lb=totalLBound, ub=totalUBound, rc=localrc)
+              case (7)
+                call ESMF_LocalArrayAdjust7DI8(array, totalCount, &
+                                    lb=totalLBound, ub=totalUBound, rc=localrc)
+^endif
+              case default
+                    if (ESMF_LogFoundError(ESMF_RC_ARG_BAD, &
+                                msg="Unsupported rank", &
+                                 ESMF_CONTEXT, rcToReturn=rc)) return
+            end select
+          case (ESMF_TYPEKIND_R4%dkind)
+            select case(rank)
+              case (1)
+                call ESMF_LocalArrayAdjust1DR4(array, totalCount, &
+                                    lb=totalLBound, ub=totalUBound, rc=localrc)
+              case (2)
+                call ESMF_LocalArrayAdjust2DR4(array, totalCount, &
+                                    lb=totalLBound, ub=totalUBound, rc=localrc)
+              case (3)
+                call ESMF_LocalArrayAdjust3DR4(array, totalCount, &
+                                    lb=totalLBound, ub=totalUBound, rc=localrc)
+              case (4)
+                call ESMF_LocalArrayAdjust4DR4(array, totalCount, &
+                                    lb=totalLBound, ub=totalUBound, rc=localrc)
+^ifndef ESMF_NO_GREATER_THAN_4D
+              case (5)
+                call ESMF_LocalArrayAdjust5DR4(array, totalCount, &
+                                    lb=totalLBound, ub=totalUBound, rc=localrc)
+              case (6)
+                call ESMF_LocalArrayAdjust6DR4(array, totalCount, &
+                                    lb=totalLBound, ub=totalUBound, rc=localrc)
+              case (7)
+                call ESMF_LocalArrayAdjust7DR4(array, totalCount, &
+                                    lb=totalLBound, ub=totalUBound, rc=localrc)
+^endif
+              case default
+                    if (ESMF_LogFoundError(ESMF_RC_ARG_BAD, &
+                                msg="Unsupported rank", &
+                                 ESMF_CONTEXT, rcToReturn=rc)) return
+            end select
+          case (ESMF_TYPEKIND_R8%dkind)
+            select case(rank)
+              case (1)
+                call ESMF_LocalArrayAdjust1DR8(array, totalCount, &
+                                    lb=totalLBound, ub=totalUBound, rc=localrc)
+              case (2)
+                call ESMF_LocalArrayAdjust2DR8(array, totalCount, &
+                                    lb=totalLBound, ub=totalUBound, rc=localrc)
+              case (3)
+                call ESMF_LocalArrayAdjust3DR8(array, totalCount, &
+                                    lb=totalLBound, ub=totalUBound, rc=localrc)
+              case (4)
+                call ESMF_LocalArrayAdjust4DR8(array, totalCount, &
+                                    lb=totalLBound, ub=totalUBound, rc=localrc)
+^ifndef ESMF_NO_GREATER_THAN_4D
+              case (5)
+                call ESMF_LocalArrayAdjust5DR8(array, totalCount, &
+                                    lb=totalLBound, ub=totalUBound, rc=localrc)
+              case (6)
+                call ESMF_LocalArrayAdjust6DR8(array, totalCount, &
+                                    lb=totalLBound, ub=totalUBound, rc=localrc)
+              case (7)
+                call ESMF_LocalArrayAdjust7DR8(array, totalCount, &
+                                    lb=totalLBound, ub=totalUBound, rc=localrc)
+^endif
+              case default
+                    if (ESMF_LogFoundError(ESMF_RC_ARG_BAD, &
+                                msg="Unsupported rank", &
+                                 ESMF_CONTEXT, rcToReturn=rc)) return
+            end select
+          case default
+                if (ESMF_LogFoundError(ESMF_RC_ARG_BAD, &
+                                msg="Unsupported kind", &
+                                 ESMF_CONTEXT, rcToReturn=rc)) return
+        end select
+
+    ! check localrc for errors
+    if (ESMF_LogFoundError(localrc, &
+      ESMF_ERR_PASSTHRU, &
+      ESMF_CONTEXT, rcToReturn=rc)) return
+
+    ! return successfully
+    if (present(rc)) rc = ESMF_SUCCESS
+
+  end subroutine ESMF_LocalArrayAdjust
+!------------------------------------------------------------------------------
+
+#define LocalArrayAdjustDoc() \
+!---------------------------------------------------------------------------- @\
+!BOPI @\
+! !IROUTINE: ESMF_LocalArrayAdjust<rank><type><kind> - Adjust the bounds of the Fortran pointer member according to the proper T/K/R @\
+! @\
+! !INTERFACE: @\
+!      recursive subroutine ESMF_LocalArrayAdjust<rank><type><kind>(array,&@\
+!  totalCount, lb, ub, rc) @\
+! @\
+! !ARGUMENTS: @\
+!      type(ESMF_LocalArray), intent(inout) :: array @\
+!      integer, dimension(:), intent(in) :: totalCount @\
+!      integer, dimension(:), intent(in), optional :: lb @\
+!      integer, dimension(:), intent(in), optional :: ub @\
+!      integer, intent(out), optional :: rc   @\
+! @\
+! !DESCRIPTION: @\
+! Each LocalArray object internally keeps a reference to an F90 array pointer. @\
+! This call modifies the meta-data associated with this F90 array pointer @\
+! by passing the F90 array pointer into a F90 subroutine with an explicit shape @\
+! dummy argument. On this interface the bounds meta data for the dummy argument @\
+! is not those of the actual argument but is reset to the bounds specified @\
+! on the subroutine interface. Using macros the bounds on the callee side are @\
+! set to match those of the LocalArray object meta data. Finally the internal @\
+! F90 array pointer is reset to reflect the desired bounds in the F90 dope @\
+! vector. The risk of data copy on this interface should be minimal because @\
+! the shape is not changed and the dummy argument has the target attribute. @\
+!EOPI @\
+!---------------------------------------------------------------------------- @\
+ @\
+
+#define LocalArrayAdjustMacro(mname, mtypekind, mrank, mdim, mlen, mrng, mloc) \
+!---------------------------------------------------------------------------- @\
+^undef  ESMF_METHOD @\
+!define ESMF_METHOD "ESMF_LocalArrayAdjust##mrank##D##mtypekind" @\
+^define ESMF_METHOD "ESMF_LocalArrayAdjust" @\
+ @\
+  recursive subroutine ESMF_LocalArrayAdjust##mrank##D##mtypekind(array, &@\
+    totalCount, lb, ub, rc) @\
+ @\
+    type(ESMF_LocalArray), intent(inout) :: array @\
+    integer, dimension(:), intent(in) :: totalCount @\
+    integer, dimension(:), intent(in) :: lb @\
+    integer, dimension(:), intent(in) :: ub @\
+    integer, intent(out), optional :: rc   @\
+ @\
+    ! Local variables @\
+    integer :: localrc                   ! local return code @\
+ @\
+    type (ESMF_LAWrap##mrank##D##mtypekind) :: wrap ! to pass f90 ptr to C++ @\
+    mname (ESMF_KIND_##mtypekind), dimension(mdim), pointer :: farrayPtr  @\
+ @\
+    ! Initialize return code; assume routine not implemented @\
+    localrc = ESMF_RC_NOT_IMPL @\
+    if (present(rc)) rc = ESMF_RC_NOT_IMPL @\
+ @\
+    ! get F90ptr member @\
+    call c_ESMC_LocalArrayGetFPtr(array, wrap, localrc) @\
+    if (ESMF_LogFoundError(localrc, & @\
+      ESMF_ERR_PASSTHRU, & @\
+      ESMF_CONTEXT, rcToReturn=rc)) return @\
+    farrayPtr => wrap%ptr##mrank##D##mtypekind @\
+!print *, "ESMF_LocalArrayAdjust*(): ", lbound(farrayPtr), ubound(farrayPtr) @\
+!call c_esmc_vmpointerprint(farrayPtr) @\
+    ! call another level deeper to do the actual bounds adjustment @\
+    call ESMF_LocalArrayAdjustShape##mrank##D##mtypekind(array, & @\
+      totalCount, lb, ub, farrayPtr, rc=localrc) @\
+    if (ESMF_LogFoundError(localrc, & @\
+      ESMF_ERR_PASSTHRU, & @\
+      ESMF_CONTEXT, rcToReturn=rc)) return @\
+ @\
+    ! return successfully @\
+    if (present(rc)) rc = ESMF_SUCCESS @\
+ @\
+  end subroutine ESMF_LocalArrayAdjust##mrank##D##mtypekind  @\
+ @\
+!---------------------------------------------------------------------------- @\
+
+TypeKindRankDeclarationMacro(LocalArrayAdjust)
+
+
+#define LocalArrayAdjustShapeDoc() \
+!---------------------------------------------------------------------------- @\
+!BOPI @\
+! !IROUTINE: ESMF_LocalArrayAdjustShape<rank><type><kind> - Adjust the bounds of the Fortran pointer member according to the proper T/K/R @\
+! @\
+! !INTERFACE: @\
+!      recursive subroutine ESMF_LocalArrayAdjustShape<rank><type><kind>(array,&@\
+!  totalCount, lb, ub, fshape, rc) @\
+! @\
+! !ARGUMENTS: @\
+!      type(ESMF_LocalArray), intent(inout) :: array @\
+!      integer, dimension(:), intent(in) :: totalCount @\
+!      integer, dimension(:), intent(in), optional :: lb @\
+!      integer, dimension(:), intent(in), optional :: ub @\
+!      mname (ESMF_KIND_##mtypekind), dimension(mdim), target :: fshape(mrng) @\
+!      integer, intent(out), optional :: rc   @\
+! @\
+! !DESCRIPTION: @\
+! Each LocalArray object internally keeps a reference to an F90 array pointer. @\
+! This call modifies the meta-data associated with this F90 array pointer @\
+! by passing the F90 array pointer into a F90 subroutine with an explicit shape @\
+! dummy argument. On this interface the bounds meta data for the dummy argument @\
+! is not those of the actual argument but is reset to the bounds specified @\
+! on the subroutine interface. Using macros the bounds on the callee side are @\
+! set to match those of the LocalArray object meta data. Finally the internal @\
+! F90 array pointer is reset to reflect the desired bounds in the F90 dope @\
+! vector. The risk of data copy on this interface should be minimal because @\
+! the shape is not changed and the dummy argument has the target attribute. @\
+!EOPI @\
+!---------------------------------------------------------------------------- @\
+ @\
+
+#define LocalArrayAdjustShapeMacro(mname, mtypekind, mrank, mdim, mlen, mrng, mloc) \
+!---------------------------------------------------------------------------- @\
+^undef  ESMF_METHOD @\
+!define ESMF_METHOD "ESMF_LocalArrayAdjustShape##mrank##D##mtypekind" @\
+^define ESMF_METHOD "ESMF_LocalArrayAdjustShape" @\
+ @\
+  recursive subroutine ESMF_LocalArrayAdjustShape##mrank##D##mtypekind(array, &@\
+    totalCount, lb, ub, fshape, rc) @\
+ @\
+    type(ESMF_LocalArray), intent(inout) :: array @\
+    integer, dimension(:), intent(in) :: totalCount @\
+    integer, dimension(:), intent(in) :: lb @\
+    integer, dimension(:), intent(in) :: ub @\
+    mname (ESMF_KIND_##mtypekind), dimension(mdim), target :: fshape(mrng) @\
+    integer, intent(out), optional :: rc   @\
+ @\
+    ! Local variables @\
+    integer :: localrc                   ! local return code @\
+ @\
+    type (ESMF_LAWrap##mrank##D##mtypekind) :: wrap ! to pass f90 ptr to C++ @\
+    mname (ESMF_KIND_##mtypekind), dimension(mdim), pointer :: farrayPtr  @\
+ @\
+    ! Initialize return code; assume routine not implemented @\
+    localrc = ESMF_RC_NOT_IMPL @\
+    if (present(rc)) rc = ESMF_RC_NOT_IMPL @\
+ @\
+!print *, "ESMF_LocalArrayAdjustShape*(): ", lbound(fshape), ubound(fshape) @\
+!call c_esmc_vmpointerprint(fshape) @\
+    ! set the member in LocalArray @\
+    wrap%ptr##mrank##D##mtypekind => fshape @\
+    call c_ESMC_LocalArraySetFPtr(array, wrap, localrc) @\
+    if (ESMF_LogFoundError(localrc, & @\
+      ESMF_ERR_PASSTHRU, & @\
+      ESMF_CONTEXT, rcToReturn=rc)) return @\
+    ! some compilers will have made a copy on the way to down here @\
+    ! the following call forces the base address encoded in the F90 @\
+    ! dope vector to point to the actual memory allocation *if* a mismatch @\
+    ! on the first data element location is detected, i.e. we are dealing @\
+    ! with a temporary copy of the actual array. @\
+    call c_ESMC_LocalArrayForceFPtr(array, & @\
+      ESMF_DATA_ADDRESS(fshape(mloc)), localrc) @\
+    if (ESMF_LogFoundError(localrc, & @\
+      ESMF_ERR_PASSTHRU, & @\
+      ESMF_CONTEXT, rcToReturn=rc)) return @\
+ @\
+    ! return successfully @\
+    if (present(rc)) rc = ESMF_SUCCESS @\
+ @\
+  end subroutine ESMF_LocalArrayAdjustShape##mrank##D##mtypekind  @\
+ @\
+!---------------------------------------------------------------------------- @\
+
+TypeKindRankDeclarationMacro(LocalArrayAdjustShape)
+
+
+!------------------------------------------------------------------------------
+^undef  ESMF_METHOD
+^define ESMF_METHOD "ESMF_LocalArrayValidate"
+!BOPI
+! !IROUTINE: ESMF_LocalArrayValidate - Check validity of LocalArray object
+!
+! !INTERFACE:
+  subroutine ESMF_LocalArrayValidate(array, options, rc)
+!
+!
+! !ARGUMENTS:
+    type(ESMF_LocalArray),  intent(in)              :: array
+    character(len = *),     intent(in),   optional  :: options
+    integer,                intent(out),  optional  :: rc
+!
+! !DESCRIPTION:
+!      Validate a {\tt ESMF\_LocalArray} object.
+!
+!EOPI
+!------------------------------------------------------------------------------
+    character (len=6) :: defaultopts      ! default print options
+    integer :: localrc                     ! local return code
+    logical :: rcpresent
+
+    ! Initialize return code; assume routine not implemented
+    localrc = ESMF_RC_NOT_IMPL
+    rcpresent = .FALSE.
+    if (present(rc)) then
+      rcpresent = .TRUE.
+      rc = ESMF_RC_NOT_IMPL
+    endif
+
+    ! Check init status of arguments
+    ESMF_INIT_CHECK_DEEP(ESMF_LocalArrayGetInit, array, rc)
+
+    defaultopts = "brief"
+
+    if(present(options)) then
+      !call c_ESMC_LocalArrayValidate(array, options, localrc)
+    else
+      !call c_ESMC_LocalArrayValidate(array, defaultopts, localrc)
+    endif
+
+    ! Return successfully
+    if (rcpresent) rc = ESMF_SUCCESS
+
+  end subroutine ESMF_LocalArrayValidate
+!------------------------------------------------------------------------------
+
+
+!------------------------------------------------------------------------------
+^undef  ESMF_METHOD
+^define ESMF_METHOD "ESMF_LocalArrayPrint"
+!BOPI
+! !IROUTINE: ESMF_LocalArrayPrint - Print contents of an LocalArray object
+!
+! !INTERFACE:
+  subroutine ESMF_LocalArrayPrint(array, options, rc)
+!
+!
+! !ARGUMENTS:
+    type(ESMF_LocalArray),  intent(in)              :: array
+    character(len = *),     intent(in),   optional  :: options
+    integer,                intent(out),  optional  :: rc
+!
+! !DESCRIPTION:
+!      Print information about a {\tt ESMF\_LocalArray}.
+!
+!EOPI
+!------------------------------------------------------------------------------
+    character (len=6) :: defaultopts      ! default print options
+    integer :: localrc                     ! local return code
+    logical :: rcpresent
+    !character(len=ESMF_MAXSTR) :: msgbuf
+
+    ! Initialize return code; assume routine not implemented
+    localrc = ESMF_RC_NOT_IMPL
+    rcpresent = .FALSE.
+    if (present(rc)) then
+      rcpresent = .TRUE.
+      rc = ESMF_RC_NOT_IMPL
+    endif
+
+    ! Check init status of arguments
+    ESMF_INIT_CHECK_DEEP(ESMF_LocalArrayGetInit, array, rc)
+
+    if (array%this .eq. ESMF_NULL_POINTER) then
+      !write(msgbuf,*)  "LocalArray Print:"
+      !call ESMF_LogWrite(msgbuf, ESMF_LOGMSG_INFO)
+      write(*,*)  "LocalArray Print:"
+      !write(msgbuf,*)  " Empty or Uninitialized LocalArray"
+      !call ESMF_LogWrite(msgbuf, ESMF_LOGMSG_INFO)
+      write(*,*)  " Empty or Uninitialized LocalArray"
+      if (present(rc)) rc = ESMF_SUCCESS
+      return
+    endif
+
+    defaultopts = "brief"
+
+    ! Flush before crossing language interface to ensure correct output order
+    call ESMF_UtilIOUnitFlush(ESMF_UtilIOStdout, rc=localrc)
+    if (ESMF_LogFoundError(localrc, ESMF_ERR_PASSTHRU, &
+      ESMF_CONTEXT, rcToReturn=rc)) return
+
+    if(present(options)) then
+        call c_ESMC_LocalArrayPrint(array, options, localrc)
+    else
+        call c_ESMC_LocalArrayPrint(array, defaultopts, localrc)
+    endif
+
+    if (ESMF_LogFoundError(localrc, &
+      ESMF_ERR_PASSTHRU, &
+      ESMF_CONTEXT, rcToReturn=rc)) return
+
+    ! Return successfully
+    if (rcpresent) rc = ESMF_SUCCESS
+
+  end subroutine ESMF_LocalArrayPrint
+!------------------------------------------------------------------------------
+
+
+! -------------------------- ESMF-internal method -----------------------------
+^undef  ESMF_METHOD
+^define ESMF_METHOD "ESMF_LocalArrayGetInit"
+!BOPI
+! !IROUTINE: ESMF_LocalArrayGetInit - Internal access routine for init code
+!
+! !INTERFACE:
+  function ESMF_LocalArrayGetInit(array)
+!
+! !RETURN VALUE:
+    ESMF_INIT_TYPE :: ESMF_LocalArrayGetInit
+!
+! !ARGUMENTS:
+    type(ESMF_LocalArray), intent(in), optional :: array
+!
+! !DESCRIPTION:
+!      Access deep object init code.
+!
+!     The arguments are:
+!     \begin{description}
+!     \item [array]
+!           LocalArray object.
+!     \end{description}
+!
+!EOPI
+!------------------------------------------------------------------------------
+    if (present(array)) then
+      ESMF_LocalArrayGetInit = ESMF_INIT_GET(array)
+    else
+      ESMF_LocalArrayGetInit = ESMF_INIT_CREATED
+    endif
+
+  end function ESMF_LocalArrayGetInit
+!------------------------------------------------------------------------------
+
+
+! -------------------------- ESMF-public method -------------------------------
+#undef  ESMF_METHOD
+#define ESMF_METHOD "ESMF_LocalArraySetInitCreated()"
+!BOPI
+! !IROUTINE: ESMF_LocalArraySetInitCreated - Set LocalArray init code to "CREATED"
+
+! !INTERFACE:
+  subroutine ESMF_LocalArraySetInitCreated(array, rc)
+!
+! !ARGUMENTS:
+    type(ESMF_LocalArray),  intent(inout)           :: array
+    integer,                intent(out),  optional  :: rc
+!
+!
+! !DESCRIPTION:
+!      Set init code in LocalArray object to "CREATED".
+!
+!     The arguments are:
+!     \begin{description}
+!     \item[array]
+!          Specified {\tt ESMF\_LocalArray} object.
+!     \item[{[rc]}]
+!          Return code; equals {\tt ESMF\_SUCCESS} if there are no errors.
+!     \end{description}
+!
+!EOPI
+!------------------------------------------------------------------------------
+    integer :: localrc                        ! local return code
+
+    ! Assume failure until success
+    if (present(rc)) rc = ESMF_RC_NOT_IMPL
+    localrc = ESMF_RC_NOT_IMPL
+
+    ! Set init code
+    ESMF_INIT_SET_CREATED(array)
+
+    ! Return success
+    if (present(rc)) rc = ESMF_SUCCESS
+
+  end subroutine ESMF_LocalArraySetInitCreated
+!------------------------------------------------------------------------------
+
+
+! -------------------------- ESMF-public method -------------------------------
+#undef  ESMF_METHOD
+#define ESMF_METHOD "ESMF_LocalArrayGetThis()"
+!BOPI
+! !IROUTINE: ESMF_LocalArrayGetThis - Internal access routine for C++ pointer
+
+! !INTERFACE:
+  subroutine ESMF_LocalArrayGetThis(array, this, rc)
+!
+! !ARGUMENTS:
+    type(ESMF_LocalArray),  intent(in), optional  :: array
+    type(ESMF_Pointer),     intent(out)           :: this
+    integer,                intent(out),optional  :: rc
+!
+!
+! !DESCRIPTION:
+!     Internal access routine for C++ pointer.
+!
+!     The arguments are:
+!     \begin{description}
+!     \item[array]
+!          Specified {\tt ESMF\_LocalArray} object.
+!     \item[this]
+!          C++ pointer.
+!     \item[{[rc]}]
+!          Return code; equals {\tt ESMF\_SUCCESS} if there are no errors.
+!     \end{description}
+!
+!EOPI
+!------------------------------------------------------------------------------
+    integer :: localrc                        ! local return code
+
+    ! Assume failure until success
+    if (present(rc)) rc = ESMF_RC_NOT_IMPL
+    localrc = ESMF_RC_NOT_IMPL
+
+    ! Copy C++ pointer
+    this = array%this
+
+    ! Return success
+    if (present(rc)) rc = ESMF_SUCCESS
+
+  end subroutine ESMF_LocalArrayGetThis
+!------------------------------------------------------------------------------
+
+
+! -------------------------- ESMF-public method -------------------------------
+#undef  ESMF_METHOD
+#define ESMF_METHOD "ESMF_LocalArraySetThis()"
+!BOPI
+! !IROUTINE: ESMF_LocalArraySetThis - Set C++ pointer in LocalArray
+
+! !INTERFACE:
+  subroutine ESMF_LocalArraySetThis(localarray, this, rc)
+!
+! !ARGUMENTS:
+    type(ESMF_LocalArray),  intent(inout)           :: localarray
+    type(ESMF_Pointer),     intent(in)              :: this
+    integer,                intent(out),  optional  :: rc
+!
+!
+! !DESCRIPTION:
+!     Set C++ pointer in LocalArray.
+!
+!     The arguments are:
+!     \begin{description}
+!     \item[localarray]
+!          Specified {\tt ESMF\_LocalArray} object.
+!     \item[this]
+!          C++ pointer.
+!     \item[{[rc]}]
+!          Return code; equals {\tt ESMF\_SUCCESS} if there are no errors.
+!     \end{description}
+!
+!EOPI
+!------------------------------------------------------------------------------
+    integer :: localrc                        ! local return code
+
+    ! Assume failure until success
+    if (present(rc)) rc = ESMF_RC_NOT_IMPL
+    localrc = ESMF_RC_NOT_IMPL
+
+    ! Copy C++ pointer
+    localarray%this = this
+
+    ! Return success
+    if (present(rc)) rc = ESMF_SUCCESS
+
+  end subroutine ESMF_LocalArraySetThis
+!------------------------------------------------------------------------------
+
+
+!------------------------------------------------------------------------------
+end module ESMF_LocalArrayCreateMod
+

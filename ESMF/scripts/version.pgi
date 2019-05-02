@@ -1,0 +1,8 @@
+#!/bin/sh
+# this script expects as input argument a command (with options) that
+# returns the version of the PGI compiler. The output then of this script is
+# the numeric version number triplet.
+VIND=$1
+shift 1
+VNUM=`$* 2>&1 | grep -E '(pgf90|pgfortran|pgCC|pgc\+\+) ' | cut -f2 -d' ' | tr '\.\-' '  '`
+echo `echo $VNUM | cut -d' ' -f$VIND`

@@ -1,0 +1,19 @@
+% $Id$
+
+%\subsection{Design and Implementation Notes}
+
+\begin{enumerate}
+
+\item The XGrid class is implemented in Fortran, and as such is
+defined inside the framework by a XGrid derived type and a set of 
+subprograms (functions and subroutines) which operate on that derived type.  
+The XGrid class contains information needed to create Grid, Field, and
+communication routehandle.
+
+\item XGrid follows the framework-wide convention of the
+{\it unison} creation and operation rule: All PETs which are
+part of the currently executing VM must create the
+same XGrids at the same point in their execution. 
+In addition to the unison rule, XGrid creation also performs inter-PET
+communication within the current executing VM. 
+\end{enumerate}
